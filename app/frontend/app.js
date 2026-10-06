@@ -1353,16 +1353,9 @@ async function previewFileDirectly(node, options = {}) {
     }
   }
 
-  // 3. Подготовка элемента для рендеринга одиночного документа
-  let item = node;
-
-  if (["DOC", "RTF"].includes(ext)) {
-    item = {
-      ...node,
-      previewType: "WORD",
-      previewFor: { type: ext, name: node.name, path: node.path },
-    };
-  } else if (ext === "DWG") {
+  // 3. Подготовка элемента для рендеринга одиночного документа (DWG/PDF/изображения/TXT)
+  let item = null;
+  if (ext === "DWG") {
     if (!state.pairless && !state.pdfPairIndex && state.currentManifest?.tree) {
       state.pdfPairIndex = buildPdfPairIndex(getCachedFlatNodes());
     }
@@ -3057,14 +3050,10 @@ async function requestHighQualityPage(page) {
   if (state.activePageKey === key) {
     }
   try {
-    const endpoint = page.previewType === "WORD"
-      ? "/api/word/page"
-      : page.previewType === "DWG_MODEL"
-        ? "/api/dwg/model-page"
-        : page.previewType === "EXCEL"
-          ? "/api/excel/page"
-          : "/api/pdf/page";
-    const sourceFile = ["WORD", "DWG_MODEL", "EXCEL"].includes(page.previewType)
+    const endpoint = page.previewType === "DWG_MODEL"
+      ? "/api/dwg/model-page"
+      : "/api/pdf/page";
+    const sourceFile = page.previewType === "DWG_MODEL"
       ? page.previewFor?.path
       : page.documentPath;
     const response = await fetch(endpoint, {
@@ -3664,12 +3653,12 @@ async function renderSelectedFiles() {
     return;
   }
   const excelItems = previewItems.filter((item) => item.previewType === "EXCEL");
-  if (excelItems.length === previewItems.length && excelItems.length <= 10) {
+  if (excelItems.length === previewItems.length && excelItems.length > 0) {
     await renderExcelWorkbooks(excelItems);
     return;
   }
   const wordItems = previewItems.filter((item) => item.previewType === "WORD");
-  if (wordItems.length === previewItems.length && wordItems.length <= 10) {
+  if (wordItems.length === previewItems.length && wordItems.length > 0) {
     await renderWordDocuments(wordItems);
     return;
   }

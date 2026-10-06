@@ -63,7 +63,6 @@ WORD_CACHE_DIR = RUNTIME_DIR / "cache" / "word"
 EXCEL_CACHE_DIR = RUNTIME_DIR / "cache" / "excel"
 DWG_CACHE_DIR = RUNTIME_DIR / "cache" / "dwg"
 WORD_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_word_to_pdf.ps1"
-EXCEL_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_excel_to_pdf.ps1"
 EXCEL_XLS_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_xls_to_xlsx.ps1"
 DWG_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_model_space.ps1"
 DWG_SMART_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_smart.ps1"
@@ -2575,113 +2574,6 @@ def excel_workbook_preview(path: Path) -> dict:
     }
 
 
-def excel_to_pdf(path: Path) -> tuple[Path, bool]:
-    if not path.exists():
-        raise FileNotFoundError(f"Excel-файл не найден: {path}")
-    if not path.is_file() or not is_excel_file(path):
-        raise ValueError(f"Это не Excel-файл: {path}")
-    if not EXCEL_CONVERT_SCRIPT.exists():
-        raise RuntimeError(f"Скрипт конвертации Excel не найден: {EXCEL_CONVERT_SCRIPT}")
-
-    key = file_cache_key(path, "excel-pdf")
-    target_dir = EXCEL_CACHE_DIR / key
-    target_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = target_dir / f"{path.stem}.pdf"
-    manifest_path = target_dir / "manifest.json"
-
-    cached = False
-    if pdf_path.exists() and pdf_path.stat().st_size > 0 and manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            cached = (
-                manifest.get("sourcePath") == str(path)
-                and manifest.get("cacheKey") == key
-                and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
-                and manifest.get("sourceSize") == path.stat().st_size
-            )
-        except (OSError, json.JSONDecodeError):
-            cached = False
-
-    if cached:
-        return pdf_path, True
-
-    if pdf_path.exists():
-        pdf_path.unlink()
-
-    process = subprocess.run(
-        [
-            "powershell",
-            "-STA",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(EXCEL_CONVERT_SCRIPT),
-            "-InputPath",
-            str(path),
-            "-OutputPath",
-            str(pdf_path),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=EXCEL_CONVERT_TIMEOUT_SECONDS,
-        **hidden_process_kwargs(),
-    )
-    if process.returncode != 0:
-        message = process.stderr.strip() or process.stdout.strip() or "Excel не смог экспортировать книгу в PDF"
-        raise RuntimeError(message)
-    if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
-        raise RuntimeError("Excel не создал PDF для preview")
-
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "sourcePath": str(path),
-                "sourceName": path.name,
-                "sourceMtimeNs": path.stat().st_mtime_ns,
-                "sourceSize": path.stat().st_size,
-                "cacheKey": key,
-                "pdfPath": str(pdf_path),
-                "convertedAt": datetime.now().isoformat(timespec="seconds"),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return pdf_path, False
-
-
-def render_excel(path: Path, dpi: int = DEFAULT_PDF_DPI, first_page_only: bool = False) -> dict:
-    if not path.exists():
-        return {
-            "name": path.name,
-            "path": str(path),
-            "sourcePath": str(path),
-            "sourceName": path.name,
-            "sourceType": file_extension(path),
-            "dpi": dpi,
-            "pages": 0,
-            "renderedPages": 0,
-            "cacheKey": "",
-            "cacheHit": False,
-            "cacheHitPages": 0,
-            "newRenderedPages": 0,
-            "is_missing": True,
-            "errors": [{"error": f"Таблица не найдена на диске: {path.name}", "is_missing": True}],
-            "items": [],
-        }
-    pdf_path, convert_cache_hit = excel_to_pdf(path)
-    document = render_pdf(pdf_path, dpi=dpi, first_page_only=first_page_only)
-    document["sourcePath"] = str(path)
-    document["sourceName"] = path.name
-    document["sourceType"] = file_extension(path)
-    document["convertedPdfPath"] = str(pdf_path)
-    document["convertCacheHit"] = convert_cache_hit
-    return document
-
 
 # PyMuPDF (fitz) дважды ронял процесс при параллельном рендеринге из
 # нескольких потоков (Application Error, access violation в нативном коде).
@@ -3594,59 +3486,6 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
-        if parsed.path == "/api/excel/render":
-            try:
-                body = self.read_json()
-                raw_files = body.get("files", [])
-                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
-                if dpi < 72 or dpi > 600:
-                    raise ValueError("DPI должен быть в диапазоне 72-600")
-                if not isinstance(raw_files, list) or not raw_files:
-                    raise ValueError("Не выбраны Excel-файлы для отображения")
-                if len(raw_files) > 10:
-                    raise ValueError("За один раз пока можно отрендерить не больше 10 Excel-файлов")
-                first_page_only = bool(body.get("firstPageOnly", False))
-                documents = [render_excel(Path(str(file_path)), dpi=dpi, first_page_only=first_page_only) for file_path in raw_files]
-                document_errors = [
-                    {"document": document["name"], "path": document["path"], **error}
-                    for document in documents
-                    for error in document.get("errors", [])
-                ]
-                self.send_json(
-                    HTTPStatus.OK,
-                    {
-                        "dpi": dpi,
-                        "documents": documents,
-                        "totalPages": sum(document["pages"] for document in documents),
-                        "renderedPages": sum(document["renderedPages"] for document in documents),
-                        "errors": document_errors,
-                        "renderedAt": datetime.now().isoformat(timespec="seconds"),
-                    },
-                )
-            except Exception as error:
-                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
-            return
-
-        if parsed.path == "/api/excel/page":
-            try:
-                body = self.read_json()
-                raw_file = str(body.get("file", "")).strip()
-                page = int(body.get("page") or 1)
-                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
-                if dpi < 72 or dpi > 600:
-                    raise ValueError("DPI должен быть в диапазоне 72-600")
-                if not raw_file:
-                    raise ValueError("Не выбран Excel-файл для отображения")
-                pdf_path, convert_cache_hit = excel_to_pdf(Path(raw_file))
-                payload = render_pdf_page(pdf_path, page=page, dpi=dpi)
-                payload["sourcePath"] = raw_file
-                payload["sourceType"] = file_extension(Path(raw_file))
-                payload["convertedPdfPath"] = str(pdf_path)
-                payload["convertCacheHit"] = convert_cache_hit
-                self.send_json(HTTPStatus.OK, payload)
-            except Exception as error:
-                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
-            return
 
         if parsed.path == "/api/preview":
             try:
