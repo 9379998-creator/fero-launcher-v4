@@ -2949,7 +2949,7 @@ async function activatePdfDocument(index) {
   updateViewTransform();
 
   const fileParam = encodeURIComponent(docItem.rawUrl || `/api/file/raw?path=${encodeURIComponent(docItem.path)}`);
-  els.pdfDocFrame.src = `assets/pdf_viewer.html?file=${fileParam}`;
+  els.pdfDocFrame.src = `assets/pdf_viewer.html?v=20261006-pdf-fit-v2&file=${fileParam}`;
   forwardPdfDocContextMenu();
 }
 
@@ -3588,7 +3588,8 @@ function zoomPdf(factor) {
     return;
   }
   if (state.pdfDoc) {
-    state.pdfScale = Math.min(3, Math.max(0.35, (state.pdfScale || 1) * factor));
+    const curScale = typeof state.pdfScale === "number" ? state.pdfScale : 1;
+    state.pdfScale = Math.min(6, Math.max(0.2, Number((curScale * factor).toFixed(2))));
     els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.pdfScale }, "*");
     return;
   }
@@ -3606,7 +3607,7 @@ function updateScaleIndicator() {
 }
 
 function zoomThumbs(factor) {
-  state.thumbScale = Math.min(5, Math.max(0.4, Number((state.thumbScale * factor).toFixed(2))));
+  state.thumbScale = Math.min(10, Math.max(0.4, Number((state.thumbScale * factor).toFixed(2))));
   els.pdfThumbs.style.setProperty("--thumb-scale", String(state.thumbScale));
   try {
     localStorage.setItem("launcher_thumb_scale", String(state.thumbScale));
@@ -4598,6 +4599,8 @@ els.viewFit.addEventListener("click", () => {
   }
   if (state.pdfDoc) {
     state.view.rotation = 0;
+    state.pdfScale = 1;
+    state.view.userZoomed = false;
     els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: 0 }, "*");
     els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
     return;
@@ -4705,7 +4708,11 @@ if (els.excelViewer) {
 }
 
 window.addEventListener("message", (event) => {
-  if (event.data?.type === "launcher-toggle-full-view") {
+  if (event.data?.type === "launcher-pdf-scale-changed") {
+    if (typeof event.data.value === "number") {
+      state.pdfScale = event.data.value;
+    }
+  } else if (event.data?.type === "launcher-toggle-full-view") {
     setViewerMode(state.viewMode === "full" ? "standard" : "full");
   } else if (event.data?.type === "launcher-escape") {
     handleGlobalEscape();
@@ -4771,6 +4778,51 @@ els.pdfThumbs.addEventListener("wheel", (event) => {
   zoomThumbs(event.deltaY < 0 ? 1.15 : 0.87);
 }, { passive: false });
 
+// Панорамирование во 2-м окне (лента миниатюр) левой кнопкой мыши ("рука / лапа")
+let _thumbDragging = false;
+let _thumbDragStartX = 0;
+let _thumbDragStartY = 0;
+let _thumbScrollStartX = 0;
+let _thumbScrollStartY = 0;
+let _thumbDragMoved = false;
+
+els.pdfThumbs.addEventListener("mousedown", (event) => {
+  if (event.button !== 0) return; // только левая кнопка мыши
+  _thumbDragging = true;
+  _thumbDragMoved = false;
+  _thumbDragStartX = event.clientX;
+  _thumbDragStartY = event.clientY;
+  _thumbScrollStartX = els.pdfThumbs.scrollLeft;
+  _thumbScrollStartY = els.pdfThumbs.scrollTop;
+  els.pdfThumbs.classList.add("dragging");
+});
+
+window.addEventListener("mousemove", (event) => {
+  if (!_thumbDragging) return;
+  const dx = event.clientX - _thumbDragStartX;
+  const dy = event.clientY - _thumbDragStartY;
+  if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+    _thumbDragMoved = true;
+  }
+  els.pdfThumbs.scrollLeft = _thumbScrollStartX - dx;
+  els.pdfThumbs.scrollTop = _thumbScrollStartY - dy;
+});
+
+window.addEventListener("mouseup", (event) => {
+  if (!_thumbDragging) return;
+  _thumbDragging = false;
+  els.pdfThumbs.classList.remove("dragging");
+});
+
+// Предотвращаем срабатывание клика по карточке, если пользователь тащил ленту лапой
+els.pdfThumbs.addEventListener("click", (event) => {
+  if (_thumbDragMoved) {
+    event.stopPropagation();
+    event.preventDefault();
+    _thumbDragMoved = false;
+  }
+}, true);
+
 // Панель управления масштабом (кнопки −, 100%, + в верхней панели)
 // 100% работает везде во всех окнах: в левом поле, во втором поле, а при просмотре чертежа дублирует «Вписать»
 if (els.scaleResetBtn) {
@@ -4779,9 +4831,10 @@ if (els.scaleResetBtn) {
     state.treeScale = 1;
     document.documentElement.style.setProperty("--tree-scale", "1");
 
-    // 2. Сброс масштаба второго поля (лента миниатюр)
+    // 2. Сброс масштаба второго поля (лента миниатюр) и мгновенное вписывание обратно
     state.thumbScale = 1;
     els.pdfThumbs.style.setProperty("--thumb-scale", "1");
+    els.pdfThumbs.scrollLeft = 0;
 
     try {
       localStorage.setItem("launcher_tree_scale", "1");
@@ -4795,6 +4848,8 @@ if (els.scaleResetBtn) {
       els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
     } else if (state.pdfDoc) {
       state.view.rotation = 0;
+      state.pdfScale = 1;
+      state.view.userZoomed = false;
       els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: 0 }, "*");
       els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
     } else if (!els.pdfPageImage.hidden) {
@@ -4804,7 +4859,7 @@ if (els.scaleResetBtn) {
     }
 
     updateScaleIndicator();
-    showToast("Масштаб: 100% (исходный)");
+    showToast("Масштаб: 100% (вписано)");
   });
 }
 
@@ -4840,7 +4895,7 @@ try {
     document.documentElement.style.setProperty("--tree-scale", String(state.treeScale));
   }
   const savedThumbScale = parseFloat(localStorage.getItem("launcher_thumb_scale") || "1");
-  if (savedThumbScale && savedThumbScale >= 0.4 && savedThumbScale <= 5) {
+  if (savedThumbScale && savedThumbScale >= 0.4 && savedThumbScale <= 10) {
     state.thumbScale = savedThumbScale;
     els.pdfThumbs.style.setProperty("--thumb-scale", String(state.thumbScale));
   }

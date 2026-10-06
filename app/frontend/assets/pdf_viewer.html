@@ -172,8 +172,8 @@
 
       const pageWrap = document.getElementById('page-wrap-' + pageNum);
       if (!pageWrap) return;
-      const canvas = document.getElementById('canvas-' + pageNum);
-      const ctx = canvas.getContext('2d');
+      let canvas = document.getElementById('canvas-' + pageNum);
+      if (!canvas) return;
 
       const page = await pdfDoc.getPage(pageNum);
       const rotation = (page.rotate + currentRotation) % 360;
@@ -183,30 +183,42 @@
       let baseScale = currentScale;
       if (currentScale === 'fit' || currentScale === 'auto') {
         const unscaledViewport = page.getViewport({ scale: 1.0, rotation });
-        const availableW = container.clientWidth - 48;
-        const availableH = container.clientHeight - 48;
+        const availableW = Math.max(100, container.clientWidth - 48);
+        const availableH = Math.max(100, container.clientHeight - 48);
         baseScale = Math.min(availableW / unscaledViewport.width, availableH / unscaledViewport.height);
-        baseScale = Math.max(0.2, Math.min(baseScale, 3.0));
+        baseScale = Math.max(0.1, Math.min(baseScale, 4.0));
       }
 
       const viewport = page.getViewport({ scale: baseScale * dpr, rotation });
       const cssViewport = page.getViewport({ scale: baseScale, rotation });
 
-      canvas.width = Math.floor(viewport.width);
-      canvas.height = Math.floor(viewport.height);
+      // Обновляем геометрию листа (.page-wrapper)
       pageWrap.style.width = Math.floor(cssViewport.width) + 'px';
       pageWrap.style.height = Math.floor(cssViewport.height) + 'px';
+
+      // Если предыдущий рендеринг был в процессе, отменяем его
+      if (renderedPages.has(pageNum)) {
+        const prev = renderedPages.get(pageNum);
+        if (prev.renderTask) {
+          try {
+            prev.renderTask.cancel();
+          } catch (_) {}
+        }
+        // Заменяем canvas новым чистым элементом, чтобы избежать конфликта контекстов при прерывании
+        const freshCanvas = document.createElement('canvas');
+        freshCanvas.id = 'canvas-' + pageNum;
+        canvas.replaceWith(freshCanvas);
+        canvas = freshCanvas;
+      }
+
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      const ctx = canvas.getContext('2d');
 
       const renderContext = {
         canvasContext: ctx,
         viewport: viewport
       };
-
-      if (renderedPages.has(pageNum) && renderedPages.get(pageNum).renderTask) {
-        try {
-          renderedPages.get(pageNum).renderTask.cancel();
-        } catch (_) {}
-      }
 
       const renderTask = page.render(renderContext);
       renderedPages.set(pageNum, {
@@ -252,10 +264,44 @@
       }
     });
 
-    function renderAllPages() {
+    function cancelAllRenders() {
+      for (const [pageNum, item] of renderedPages.entries()) {
+        if (item.renderTask) {
+          try {
+            item.renderTask.cancel();
+          } catch (_) {}
+        }
+      }
       renderedPages.clear();
+    }
+
+    function renderAllPages() {
+      cancelAllRenders();
       renderVisiblePages();
     }
+
+    // Wheel zoom with Ctrl: предотвращаем масштабирование всего лаунчера (браузера)
+    // и плавно масштабируем сам PDF-документ
+    window.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const factor = e.deltaY < 0 ? 1.15 : 0.87;
+      let baseScale = typeof currentScale === 'number' ? currentScale : 1.0;
+      if (currentScale === 'fit' || currentScale === 'auto') {
+        const firstWrap = container.querySelector('.page-wrapper');
+        if (firstWrap && firstWrap.offsetWidth > 0) {
+          const availW = Math.max(100, container.clientWidth - 48);
+          baseScale = Math.max(0.2, Math.min(availW / firstWrap.offsetWidth, 3.0));
+        }
+      }
+      currentScale = Math.max(0.15, Math.min(8.0, Number((baseScale * factor).toFixed(3))));
+      renderAllPages();
+      try {
+        parent.postMessage({ type: 'launcher-pdf-scale-changed', value: currentScale }, '*');
+      } catch (_) {}
+    }, { passive: false });
 
     // Drag / Pan mode
     container.addEventListener('mousedown', (e) => {
@@ -318,7 +364,13 @@
         case 'launcher-sheet-fit':
         case 'launcher-pdf-fit':
           currentScale = 'fit';
-          renderAllPages();
+          container.scrollLeft = 0;
+          container.scrollTop = 0;
+          // Даем браузеру обновить геометрию контейнера после сброса скролла,
+          // чтобы availableW и availableH были абсолютно точными
+          requestAnimationFrame(() => {
+            renderAllPages();
+          });
           break;
         case 'launcher-sheet-rotate':
         case 'launcher-pdf-rotate':
