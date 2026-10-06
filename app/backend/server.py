@@ -2271,8 +2271,16 @@ def launch_custom_app(exe_path: str, file_path: Path) -> str:
         subprocess.Popen([resolved_exe, resolved_file], cwd=file_dir)
         return f"custom-app:{Path(resolved_exe).name}"
 
-    # 1. ShellExecuteW("open", resolved_exe, f'"{resolved_file}"', file_dir, SW_SHOWNORMAL=1)
-    if _shell_open(resolved_exe, f'"{resolved_file}"', file_dir):
+    # 1. ShellExecuteW("open", resolved_exe, params, file_dir, SW_SHOWNORMAL=1)
+    # Для Microsoft Word (WINWORD.EXE) ключ /n гарантирует открытие документа в новом/активном окне,
+    # предотвращая открытие пустого шаблона/документа без параметров.
+    exe_name_lower = Path(resolved_exe).name.lower()
+    if exe_name_lower == "winword.exe":
+        shell_params = f'/n "{resolved_file}"'
+    else:
+        shell_params = f'"{resolved_file}"'
+
+    if _shell_open(resolved_exe, shell_params, file_dir):
         bring_native_window_to_front(0, resolved_exe)
         _bring_window_to_front(None, None, 120.0, file_path.name, 3)
         return f"custom-app:{Path(resolved_exe).name}"

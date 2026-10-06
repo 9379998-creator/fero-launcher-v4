@@ -284,6 +284,21 @@
       document.body.classList.remove('dragging');
     });
 
+    window.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      parent.postMessage({ type: 'launcher-contextmenu', clientX: e.clientX, clientY: e.clientY }, '*');
+    });
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        parent.postMessage({ type: 'launcher-escape' }, '*');
+      }
+    });
+
+    window.addEventListener('dblclick', (e) => {
+      parent.postMessage({ type: 'launcher-toggle-full-view' }, '*');
+    });
+
     // Message handler from parent Launcher window
     window.addEventListener('message', (event) => {
       const data = event.data;

@@ -2275,12 +2275,10 @@ function clearExcelViewer() {
   state.excelSheetIndex = 0;
   state.excelScale = 1;
   state.view.rotation = 0;
-  els.excelViewer.hidden = true;
-  els.excelBookTitle.textContent = "";
-  els.excelBookTitle.title = "";
-  els.excelTabs.replaceChildren();
-  els.excelSheetFrame.removeAttribute("src");
-  clearWordViewer();
+  if (els.excelViewer) els.excelViewer.hidden = true;
+  if (els.excelBookTitle) { els.excelBookTitle.textContent = ""; els.excelBookTitle.title = ""; }
+  if (els.excelTabs) els.excelTabs.replaceChildren();
+  if (els.excelSheetFrame) els.excelSheetFrame.removeAttribute("src");
 }
 
 function clearWordViewer() {
@@ -2292,7 +2290,6 @@ function clearWordViewer() {
   if (els.wordDocTitle) { els.wordDocTitle.textContent = ""; els.wordDocTitle.title = ""; }
   if (els.wordMeta) els.wordMeta.replaceChildren();
   if (els.wordDocFrame) els.wordDocFrame.removeAttribute("src");
-  clearPdfDocViewer();
 }
 
 function clearPdfDocViewer() {
@@ -2304,6 +2301,12 @@ function clearPdfDocViewer() {
   if (els.pdfDocTitle) { els.pdfDocTitle.textContent = ""; els.pdfDocTitle.title = ""; }
   if (els.pdfMeta) els.pdfMeta.replaceChildren();
   if (els.pdfDocFrame) els.pdfDocFrame.removeAttribute("src");
+}
+
+function clearActiveDocumentViewers() {
+  clearExcelViewer();
+  clearWordViewer();
+  clearPdfDocViewer();
 }
 
 function formatFileSize(bytes) {
@@ -2615,8 +2618,11 @@ async function activateExcelWorkbook(index) {
     tab.addEventListener("click", () => activateExcelSheet(sheet.index).catch(showOperationError));
     els.excelTabs.append(tab);
   });
+  clearWordViewer();
+  clearPdfDocViewer();
   els.excelViewer.hidden = false;
   if (els.wordViewer) els.wordViewer.hidden = true;
+  if (els.pdfViewerDoc) els.pdfViewerDoc.hidden = true;
   els.viewerControls.hidden = false;
   els.viewRotate.hidden = true;
   els.viewPanMode.hidden = false;
@@ -2759,7 +2765,10 @@ async function activateWordDocument(index) {
   chip.textContent = `${docItem.paragraphs ?? "?"} абз. · ${docItem.tables ?? "?"} табл. · ${formatFileSize(docItem.bytes)}`;
   els.wordMeta.append(chip);
 
+  clearExcelViewer();
+  clearPdfDocViewer();
   if (els.excelViewer) els.excelViewer.hidden = true;
+  if (els.pdfViewerDoc) els.pdfViewerDoc.hidden = true;
   els.wordViewer.hidden = false;
   els.viewerControls.hidden = false;
   els.viewRotate.hidden = true;
@@ -2926,6 +2935,8 @@ async function activatePdfDocument(index) {
   chip.textContent = `${docItem.pages ?? "?"} стр. · ${formatFileSize(docItem.bytes)}`;
   els.pdfMeta.append(chip);
 
+  clearExcelViewer();
+  clearWordViewer();
   if (els.excelViewer) els.excelViewer.hidden = true;
   if (els.wordViewer) els.wordViewer.hidden = true;
   els.pdfViewerDoc.hidden = false;
@@ -3048,7 +3059,7 @@ function createPageThumbElement(page) {
 async function appendPagesToViewer(pages, insertAfterKey = null, epoch = null) {
   if (!pages || !pages.length) return;
   if (epoch !== null && state.renderEpoch !== epoch) return;
-  clearExcelViewer();
+  clearActiveDocumentViewers();
   els.pdfViewer.classList.toggle("empty", false);
   els.viewerEmpty.hidden = true;
 
@@ -3232,14 +3243,25 @@ function thumbPathForPage(page) {
 // Источник текущего кадра для ПКМ в полном экране: всегда исходный файл,
 // никогда PNG-кэш. DWG через пару -> путь DWG, Word -> .docx и т.д.
 function getActiveSourceInfo() {
-  const excelPath = (state.excelWorkbook && state.excelWorkbook.path) || "";
-  if (excelPath) return { path: excelPath, ext: extOfPath(excelPath) };
+  if (els.pdfViewerDoc && !els.pdfViewerDoc.hidden && state.pdfDoc?.path) {
+    return { path: state.pdfDoc.path, ext: extOfPath(state.pdfDoc.path) };
+  }
+  if (els.wordViewer && !els.wordViewer.hidden && state.wordDoc?.path) {
+    return { path: state.wordDoc.path, ext: extOfPath(state.wordDoc.path) };
+  }
+  if (els.excelViewer && !els.excelViewer.hidden && state.excelWorkbook?.path) {
+    return { path: state.excelWorkbook.path, ext: extOfPath(state.excelWorkbook.path) };
+  }
+  if (state.pdfDoc?.path) return { path: state.pdfDoc.path, ext: extOfPath(state.pdfDoc.path) };
+  if (state.wordDoc?.path) return { path: state.wordDoc.path, ext: extOfPath(state.wordDoc.path) };
+  if (state.excelWorkbook?.path) return { path: state.excelWorkbook.path, ext: extOfPath(state.excelWorkbook.path) };
   if (state.activeTxtPath) return { path: state.activeTxtPath, ext: "TXT" };
   const page = (state.renderedPages || []).find((p) => {
     try { return pageKey(p) === state.activePageKey; } catch (_) { return false; }
   });
   const filePath = thumbPathForPage(page);
   if (filePath) return { path: filePath, ext: extOfPath(filePath) };
+  if (state.activeNativePath) return { path: state.activeNativePath, ext: extOfPath(state.activeNativePath) };
   return { path: "", ext: "" };
 }
 
@@ -3357,7 +3379,7 @@ function showPdfPage(page, options = {}) {
   if (els.wordViewer) els.wordViewer.hidden = true;
 
   if (page.previewType === "IMAGE") {
-    clearExcelViewer();
+    clearActiveDocumentViewers();
     const sourcePath = page.previewFor?.path || page.path || page.sourcePath;
     setActiveNativePath(sourcePath);
     revealPathInTree(sourcePath, { skipScroll: skipTreeScroll });
@@ -3375,7 +3397,7 @@ function showPdfPage(page, options = {}) {
   }
 
   if (page.previewType === "TXT") {
-    clearExcelViewer();
+    clearActiveDocumentViewers();
     const sourcePath = page.previewFor?.path || page.path || page.sourcePath;
     setActiveNativePath(sourcePath);
     state.activeTxtPath = sourcePath;
@@ -3395,7 +3417,7 @@ function showPdfPage(page, options = {}) {
   }
 
   if (page.type === "missing-preview" || page.type === "native-file") {
-    clearExcelViewer();
+    clearActiveDocumentViewers();
     const sourcePath = page.previewFor?.path || page.sourcePath || page.documentPath || "";
     setActiveNativePath(sourcePath);
     revealPathInTree(sourcePath, { skipScroll: skipTreeScroll });
@@ -3456,7 +3478,7 @@ function showPdfPage(page, options = {}) {
     return;
   }
 
-  clearExcelViewer();
+  clearActiveDocumentViewers();
   const highPage = state.highQualityPages.get(key);
   const displayPage = highPage || page;
   const targetDocPath = page.previewFor?.path || page.sourcePath || page.documentPath || "";
@@ -4497,13 +4519,21 @@ els.backToTree.addEventListener("click", () => {
     if (state.excelWorkbooks?.length > 1 && els.excelViewer) {
       els.excelViewer.hidden = true;
       if (els.wordViewer) els.wordViewer.hidden = true;
+      if (els.pdfViewerDoc) els.pdfViewerDoc.hidden = true;
       els.pdfViewer?.classList.remove("empty");
       renderExcelWorkbookRail();
     } else if (state.wordDocs?.length > 1 && els.wordViewer) {
       els.wordViewer.hidden = true;
       if (els.excelViewer) els.excelViewer.hidden = true;
+      if (els.pdfViewerDoc) els.pdfViewerDoc.hidden = true;
       els.pdfViewer?.classList.remove("empty");
       renderWordDocumentRail();
+    } else if (state.pdfDocs?.length > 1 && els.pdfViewerDoc) {
+      els.pdfViewerDoc.hidden = true;
+      if (els.excelViewer) els.excelViewer.hidden = true;
+      if (els.wordViewer) els.wordViewer.hidden = true;
+      els.pdfViewer?.classList.remove("empty");
+      renderPdfDocumentRail();
     }
     return;
   }
@@ -4520,6 +4550,16 @@ els.excelSheetFrame.addEventListener("load", () => {
   if (!state.excelWorkbook) return;
   els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.excelScale }, "*");
 });
+if (els.wordDocFrame) {
+  els.wordDocFrame.addEventListener("load", () => {
+    forwardWordDocContextMenu();
+  });
+}
+if (els.pdfDocFrame) {
+  els.pdfDocFrame.addEventListener("load", () => {
+    forwardPdfDocContextMenu();
+  });
+}
 els.excelTabsLeft.addEventListener("click", () => {
   els.excelTabs.scrollBy({ left: -Math.max(180, els.excelTabs.clientWidth * .72), behavior: "smooth" });
 });
@@ -4538,9 +4578,7 @@ els.viewZoomIn.addEventListener("click", () => zoomPdf(1.22));
 if (els.viewOpenNative) {
   els.viewOpenNative.addEventListener("click", () => {
     const info = getActiveSourceInfo();
-    const wb = state.excelWorkbook;
-    const wordDoc = state.wordDoc;
-    const targetPath = (info && info.path) || (wb && wb.path) || (wordDoc && wordDoc.path) || state.activeNativePath || "";
+    const targetPath = (info && info.path) || state.activeNativePath || "";
     if (targetPath) {
       openFileByPath(targetPath, "native");
     }
@@ -4549,8 +4587,6 @@ if (els.viewOpenNative) {
 
 els.viewFit.addEventListener("click", () => {
   if (state.excelWorkbook) {
-    state.view.rotation = 0;
-    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: 0 }, "*");
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
     return;
   }
@@ -4558,6 +4594,12 @@ els.viewFit.addEventListener("click", () => {
     state.wordScale = 1;
     els.wordDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: 1 }, "*");
     els.wordDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
+    return;
+  }
+  if (state.pdfDoc) {
+    state.view.rotation = 0;
+    els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: 0 }, "*");
+    els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
     return;
   }
   if (state.viewMode === "medium") {
@@ -4573,10 +4615,10 @@ els.viewRotate.addEventListener("click", () => {
   // Во 2-м режиме поворот полностью заблокирован: поворот работает только для большого окна в 1-м и 3-м режимах
   if (state.viewMode === "medium") return;
 
-  if (state.excelWorkbook) {
+  if (state.pdfDoc) {
     state.view.rotation = (state.view.rotation + 90) % 360;
-    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: state.view.rotation }, "*");
-    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
+    els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: state.view.rotation }, "*");
+    els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
     return;
   }
 
@@ -4667,6 +4709,22 @@ window.addEventListener("message", (event) => {
     setViewerMode(state.viewMode === "full" ? "standard" : "full");
   } else if (event.data?.type === "launcher-escape") {
     handleGlobalEscape();
+  } else if (event.data?.type === "launcher-contextmenu") {
+    hideFileContextMenu();
+    const info = getActiveSourceInfo();
+    const path = (info && info.path) || "";
+    if (!path) return;
+    let frameRect = { left: 0, top: 0 };
+    if (!els.pdfViewerDoc?.hidden && els.pdfDocFrame) {
+      frameRect = els.pdfDocFrame.getBoundingClientRect();
+    } else if (!els.wordViewer?.hidden && els.wordDocFrame) {
+      frameRect = els.wordDocFrame.getBoundingClientRect();
+    } else if (!els.excelViewer?.hidden && els.excelSheetFrame) {
+      frameRect = els.excelSheetFrame.getBoundingClientRect();
+    }
+    const x = frameRect.left + (Number(event.data.clientX) || 0);
+    const y = frameRect.top + (Number(event.data.clientY) || 0);
+    showFileContextMenu(x, y, { path, isDir: false, ext: extOfPath(path) });
   }
 });
 

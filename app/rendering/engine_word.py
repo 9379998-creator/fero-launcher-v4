@@ -163,6 +163,11 @@ window.addEventListener('keydown', (e) => {{
   }}
 }});
 
+window.addEventListener('contextmenu', (e) => {{
+  e.preventDefault();
+  parent.postMessage({{ type: 'launcher-contextmenu', clientX: e.clientX, clientY: e.clientY }}, '*');
+}});
+
 window.addEventListener('dblclick', (e) => {{
   parent.postMessage({{ type: 'launcher-toggle-full-view' }}, '*');
 }});

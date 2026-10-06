@@ -1021,6 +1021,12 @@ textarea:focus {
   padding: 14px;
 }
 
+.shell.full-view .pdf-stage:has(.excel-viewer:not([hidden])),
+.shell.full-view .pdf-stage:has(#wordViewer:not([hidden])),
+.shell.full-view .pdf-stage:has(#pdfViewerDoc:not([hidden])) {
+  padding: 0 !important;
+}
+
 .ribbon-load-more {
   display: flex;
   align-items: center;
