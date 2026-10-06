@@ -298,7 +298,15 @@ except ImportError:
       $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
       $psi.RedirectStandardError = $true
       $pyProc = [System.Diagnostics.Process]::Start($psi)
-      $pyProc.WaitForExit(120000)
+      try {
+        if (-not $pyProc.WaitForExit(120000)) {
+          try { Stop-Process -Id $pyProc.Id -Force -ErrorAction SilentlyContinue } catch {}
+          throw "Тайм-аут объединения страниц PDF (120с)"
+        }
+      } finally {
+        try { if (-not $pyProc.HasExited) { Stop-Process -Id $pyProc.Id -Force -ErrorAction SilentlyContinue } } catch {}
+        try { $pyProc.Dispose() } catch {}
+      }
       if ($pyProc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempCombinedPdf)) {
         $err = $pyProc.StandardError.ReadToEnd()
         throw "Ошибка объединения страниц PDF: $err"

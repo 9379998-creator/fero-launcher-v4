@@ -4020,9 +4020,8 @@ async function renderPdfDocuments(pdfFiles, options = {}) {
       return;
     }
     const pdfFile = pdfFiles[index];
-    els.progressDetail.textContent = `Документ ${index + 1} из ${pdfFiles.length}: ${pdfFile.name} — подготовка…`;
-    const controller = createOperationController();
-    const timeoutSec = 60;
+    const isDwgFile = (pdfFile.extension || "").toUpperCase() === "DWG" || (pdfFile.name || "").toLowerCase().endsWith(".dwg") || pdfFile.previewType === "DWG_MODEL";
+    const timeoutSec = isDwgFile ? 300 : 90;
     const timeoutId = setTimeout(() => controller.abort(), timeoutSec * 1000);
     try {
       const response = await fetch("/api/pdf/document", {

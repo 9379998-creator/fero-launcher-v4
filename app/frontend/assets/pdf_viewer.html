@@ -119,6 +119,7 @@
 
     async function loadDocument(url) {
       try {
+        await disposeDocument();
         loadingEl.style.display = 'flex';
         loadingEl.textContent = 'Загрузка PDF...';
         const loadingTask = pdfjsLib.getDocument({
@@ -218,6 +219,7 @@
         viewport: viewport
       };
 
+      const myGeneration = renderGeneration;
       const renderTask = page.render(renderContext);
       renderedPages.set(pageNum, {
         renderTask,
@@ -233,6 +235,13 @@
           console.error('Page render error:', pageNum, err);
         }
       } finally {
+        if (myGeneration !== renderGeneration) {
+          // Устаревший рендер от предыдущего зума/поворота
+          canvas.width = 0;
+          canvas.height = 0;
+          renderedPages.delete(pageNum);
+          return;
+        }
         const cur = renderedPages.get(pageNum);
         if (cur && cur.renderTask === renderTask) {
           cur.renderTask = null; // Рендер успешно завершён, canvas сохранён
@@ -245,15 +254,20 @@
       if (!pdfDoc) return;
       const containerRect = container.getBoundingClientRect();
       const margin = 1200; // увеличенный предпросмотр (упреждающая загрузка), чтобы при скролле не было белых листов
+      const visibleSet = new Set();
 
       for (let i = 1; i <= pdfDoc.numPages; i++) {
         const wrap = document.getElementById('page-wrap-' + i);
         if (!wrap) continue;
         const rect = wrap.getBoundingClientRect();
         if (rect.bottom >= containerRect.top - margin && rect.top <= containerRect.bottom + margin) {
+          visibleSet.add(i);
           renderPage(i);
         }
       }
+
+      // Выгружаем далекие холсты при превышении лимита (защита от раздувания памяти)
+      evictFarCanvases(visibleSet);
     }
 
     container.addEventListener('scroll', () => {
@@ -271,7 +285,11 @@
       }
     });
 
+    let renderGeneration = 0;
+    const MAX_ACTIVE_CANVASES = 12; // Ограничиваем количество активных Canvas в DOM (защита от OOM при 50+ листах)
+
     function cancelAllRenders() {
+      renderGeneration++;
       for (const [pageNum, item] of renderedPages.entries()) {
         if (item.renderTask) {
           try {
@@ -280,11 +298,45 @@
           item.renderTask = null;
         }
       }
+    }
+
+    function evictFarCanvases(visiblePageSet) {
+      if (renderedPages.size <= MAX_ACTIVE_CANVASES) return;
+      for (const [pNum, item] of renderedPages.entries()) {
+        if (!visiblePageSet.has(pNum)) {
+          if (item.renderTask) {
+            try { item.renderTask.cancel(); } catch (_) {}
+            item.renderTask = null;
+          }
+          if (item.page) {
+            try { item.page.cleanup(); } catch (_) {}
+          }
+          const canvas = document.getElementById('canvas-' + pNum);
+          if (canvas) {
+            canvas.width = 0;
+            canvas.height = 0;
+          }
+          renderedPages.delete(pNum);
+          if (renderedPages.size <= MAX_ACTIVE_CANVASES) break;
+        }
+      }
+    }
+
+    async function disposeDocument() {
+      cancelAllRenders();
       renderedPages.clear();
+      if (pdfDoc) {
+        try {
+          await pdfDoc.destroy();
+        } catch (_) {}
+        pdfDoc = null;
+      }
+      container.innerHTML = '';
     }
 
     function renderAllPages() {
       cancelAllRenders();
+      renderedPages.clear();
       renderVisiblePages();
     }
 
@@ -375,6 +427,9 @@
       switch (data.type) {
         case 'launcher-pdf-load':
           if (data.url) loadDocument(data.url);
+          break;
+        case 'launcher-pdf-clear':
+          disposeDocument();
           break;
         case 'launcher-sheet-zoom':
         case 'launcher-pdf-zoom':

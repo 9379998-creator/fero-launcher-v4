@@ -281,12 +281,18 @@ if ($pagePdfPaths.Count -eq 0) {
   $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
 
   $proc = [System.Diagnostics.Process]::Start($psi)
-  if ($proc.WaitForExit($TimeoutPerSheetSec * 1000)) {
-    if ((Test-Path -LiteralPath $modelPdf) -and (Get-Item -LiteralPath $modelPdf).Length -gt 1024) {
-      $pagePdfPaths.Add($modelPdf)
+  try {
+    if ($proc.WaitForExit($TimeoutPerSheetSec * 1000)) {
+      if ((Test-Path -LiteralPath $modelPdf) -and (Get-Item -LiteralPath $modelPdf).Length -gt 1024) {
+        $pagePdfPaths.Add($modelPdf)
+      }
+    } else {
+      try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+      Write-Output "TIMEOUT on Model space export after ${TimeoutPerSheetSec}s"
     }
-  } else {
-    try { $proc.Kill() } catch {}
+  } finally {
+    try { if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } } catch {}
+    try { $proc.Dispose() } catch {}
   }
 }
 
@@ -330,7 +336,15 @@ except ImportError:
   $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
   $psi.RedirectStandardError = $true
   $pyProc = [System.Diagnostics.Process]::Start($psi)
-  $pyProc.WaitForExit(120000)
+  try {
+    if (-not $pyProc.WaitForExit(120000)) {
+      try { Stop-Process -Id $pyProc.Id -Force -ErrorAction SilentlyContinue } catch {}
+      throw "PDF merge timed out after 120s"
+    }
+  } finally {
+    try { if (-not $pyProc.HasExited) { Stop-Process -Id $pyProc.Id -Force -ErrorAction SilentlyContinue } } catch {}
+    try { $pyProc.Dispose() } catch {}
+  }
   if ($pyProc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempCombinedPdf)) {
     $err = $pyProc.StandardError.ReadToEnd()
     throw "PDF merge failed: $err"
@@ -594,7 +608,15 @@ print(f"HTML written to {html_out} ({len(html_content)} bytes)")
     $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
     $psi.RedirectStandardError = $true
     $pyProc = [System.Diagnostics.Process]::Start($psi)
-    $pyProc.WaitForExit(180000)
+    try {
+      if (-not $pyProc.WaitForExit(180000)) {
+        try { Stop-Process -Id $pyProc.Id -Force -ErrorAction SilentlyContinue } catch {}
+        Write-Output "WARN: HTML generation timed out after 180s"
+      }
+    } finally {
+      try { if (-not $pyProc.HasExited) { Stop-Process -Id $pyProc.Id -Force -ErrorAction SilentlyContinue } } catch {}
+      try { $pyProc.Dispose() } catch {}
+    }
     if ($pyProc.ExitCode -eq 0 -and (Test-Path -LiteralPath $targetHtmlPath)) {
       $htmlDestination = $targetHtmlPath
       Write-Output ("HTML_GENERATED path={0}" -f $htmlDestination)

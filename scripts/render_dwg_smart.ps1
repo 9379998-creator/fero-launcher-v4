@@ -1,4 +1,4 @@
-param(
+﻿param(
   [Parameter(Mandatory = $true)][string]$InputPath,
   [Parameter(Mandatory = $false)][string]$OutputPath = "",
   [Parameter(Mandatory = $false)][string]$FallbackCachePath = "",
