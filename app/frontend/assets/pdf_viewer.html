@@ -288,7 +288,7 @@
       renderVisiblePages();
     }
 
-    // Wheel zoom with Ctrl: мягкое, плавное масштабирование
+    // Wheel zoom with Ctrl: мягкое, плавное масштабирование с центрированием относительно позиции курсора мыши
     window.addEventListener('wheel', (e) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
@@ -303,8 +303,23 @@
           baseScale = Math.max(0.2, Math.min(availW / firstWrap.offsetWidth, 3.0));
         }
       }
-      currentScale = Math.max(0.15, Math.min(8.0, Number((baseScale * factor).toFixed(3))));
+      const nextScale = Math.max(0.15, Math.min(8.0, Number((baseScale * factor).toFixed(3))));
+      if (nextScale === currentScale) return;
+
+      const rect = container.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      const oldScrollLeft = container.scrollLeft;
+      const oldScrollTop = container.scrollTop;
+      const oldScale = typeof currentScale === 'number' ? currentScale : baseScale;
+      const ratio = nextScale / oldScale;
+
+      currentScale = nextScale;
       renderAllPages();
+
+      container.scrollLeft = (oldScrollLeft + mouseX) * ratio - mouseX;
+      container.scrollTop = (oldScrollTop + mouseY) * ratio - mouseY;
+
       try {
         parent.postMessage({ type: 'launcher-pdf-scale-changed', value: currentScale }, '*');
       } catch (_) {}

@@ -87,11 +87,11 @@ html, body {
   border-color: #005499;
 }
 
-/* Виджет масштабирования [−] [100%] [+] */
+/* Виджет масштабирования [−] [100%] [+] в правом верхнем углу меню */
 .scale-widget {
   display: inline-flex;
   align-items: center;
-  margin-left: 6px;
+  margin-left: auto;
   gap: 2px;
 }
 
@@ -1317,7 +1317,9 @@ textarea:focus {
   transform-origin: 0 0;
 }
 
-/* Имитация движка (скроллбара) для многостраничного PDF */
+/* Имитация движка (скроллбара) для многостраничного PDF / Excel / Word */
+.excel-book-preview .thumb-scrollbar-track,
+.word-doc-preview .thumb-scrollbar-track,
 .pdf-doc-preview .thumb-scrollbar-track {
   position: absolute;
   top: 0;
@@ -1329,6 +1331,8 @@ textarea:focus {
   z-index: 2;
 }
 
+.excel-book-preview .thumb-scrollbar-thumb,
+.word-doc-preview .thumb-scrollbar-thumb,
 .pdf-doc-preview .thumb-scrollbar-thumb {
   position: absolute;
   top: 6px;
@@ -1612,7 +1616,7 @@ textarea:focus {
 /* Обёртка миниатюры с кнопками пути: как в дереве, но для ленты */
 .thumb-wrap {
   position: relative;
-  max-width: 860px;
+  max-width: calc(860px * max(1, var(--thumb-scale, 1)));
   margin: 0 auto 14px;
 }
 

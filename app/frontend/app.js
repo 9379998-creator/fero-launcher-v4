@@ -3631,10 +3631,10 @@ function fitPdfPage() {
   updateViewTransform();
 }
 
-function zoomPdf(factor) {
+function zoomPdf(factor, clientX, clientY) {
   const isStageViewing = state.viewMode === "full" || els.pdfViewer?.classList.contains("stage-active");
   if (!isStageViewing) {
-    zoomThumbs(factor);
+    zoomThumbs(factor, clientX, clientY);
     return;
   }
   if (state.excelWorkbook) {
@@ -3654,7 +3654,23 @@ function zoomPdf(factor) {
     return;
   }
   if (els.pdfPageImage.hidden) return;
-  state.view.scale = Math.min(8, Math.max(0.05, state.view.scale * factor));
+
+  const stage = els.pdfStage.getBoundingClientRect();
+  const mouseX = (typeof clientX === "number" ? clientX : (stage.left + stage.width / 2)) - stage.left;
+  const mouseY = (typeof clientY === "number" ? clientY : (stage.top + stage.height / 2)) - stage.top;
+  const stageCenterX = stage.width / 2;
+  const stageCenterY = stage.height / 2;
+  const offsetX = mouseX - stageCenterX;
+  const offsetY = mouseY - stageCenterY;
+
+  const prevScale = state.view.scale || 1;
+  const nextScale = Math.min(8, Math.max(0.05, prevScale * factor));
+  if (nextScale === prevScale) return;
+  const ratio = nextScale / prevScale;
+
+  state.view.panX = offsetX - (offsetX - state.view.panX) * ratio;
+  state.view.panY = offsetY - (offsetY - state.view.panY) * ratio;
+  state.view.scale = nextScale;
   state.view.userZoomed = true;
   updateViewTransform();
 }
@@ -3666,18 +3682,43 @@ function updateScaleIndicator() {
   }
 }
 
-function zoomThumbs(factor) {
-  state.thumbScale = Math.min(10, Math.max(0.4, Number((state.thumbScale * factor).toFixed(2))));
+function zoomThumbs(factor, clientX, clientY) {
+  const rect = els.pdfThumbs.getBoundingClientRect();
+  const mouseX = (typeof clientX === "number" ? clientX : (rect.left + rect.width / 2)) - rect.left;
+  const mouseY = (typeof clientY === "number" ? clientY : (rect.top + rect.height / 2)) - rect.top;
+  const prevScale = state.thumbScale || 1;
+  const nextScale = Math.min(10, Math.max(0.4, Number((prevScale * factor).toFixed(2))));
+  if (nextScale === prevScale) return;
+  const ratio = nextScale / prevScale;
+  const scrollX = els.pdfThumbs.scrollLeft;
+  const scrollY = els.pdfThumbs.scrollTop;
+
+  state.thumbScale = nextScale;
   els.pdfThumbs.style.setProperty("--thumb-scale", String(state.thumbScale));
+  els.pdfThumbs.scrollLeft = (scrollX + mouseX) * ratio - mouseX;
+  els.pdfThumbs.scrollTop = (scrollY + mouseY) * ratio - mouseY;
   try {
     localStorage.setItem("launcher_thumb_scale", String(state.thumbScale));
   } catch {}
   updateScaleIndicator();
 }
 
-function zoomTree(factor) {
-  state.treeScale = Math.min(2.5, Math.max(0.75, Number(((state.treeScale || 1) * factor).toFixed(2))));
+function zoomTree(factor, clientX, clientY) {
+  const scrollContainer = els.objectTree?.scrollHeight > 0 ? els.objectTree : (els.objectList?.scrollHeight > 0 ? els.objectList : els.sidebar);
+  const rect = scrollContainer.getBoundingClientRect();
+  const mouseX = (typeof clientX === "number" ? clientX : (rect.left + rect.width / 2)) - rect.left;
+  const mouseY = (typeof clientY === "number" ? clientY : (rect.top + rect.height / 2)) - rect.top;
+  const prevScale = state.treeScale || 1;
+  const nextScale = Math.min(2.5, Math.max(0.75, Number((prevScale * factor).toFixed(2))));
+  if (nextScale === prevScale) return;
+  const ratio = nextScale / prevScale;
+  const scrollX = scrollContainer.scrollLeft;
+  const scrollY = scrollContainer.scrollTop;
+
+  state.treeScale = nextScale;
   document.documentElement.style.setProperty("--tree-scale", String(state.treeScale));
+  scrollContainer.scrollLeft = (scrollX + mouseX) * ratio - mouseX;
+  scrollContainer.scrollTop = (scrollY + mouseY) * ratio - mouseY;
   try {
     localStorage.setItem("launcher_tree_scale", String(state.treeScale));
   } catch {}
@@ -4044,7 +4085,7 @@ async function renderSelectedFiles() {
   }
   const pdfItems = previewItems.filter((item) => {
     const ext = (item.extension || "").toUpperCase();
-    return ext === "PDF" || item.previewType === "PDF";
+    return ext === "PDF" || ext === "DWG" || item.previewType === "PDF" || item.previewType === "DWG_MODEL";
   });
   if (pdfItems.length === previewItems.length && pdfItems.length > 0) {
     await renderPdfDocuments(pdfItems);
@@ -4825,7 +4866,7 @@ if (els.sidebar) {
     if (!event.ctrlKey || !event.deltaY) return;
     event.preventDefault();
     event.stopPropagation();
-    zoomTree(event.deltaY < 0 ? 1.08 : 0.92);
+    zoomTree(event.deltaY < 0 ? 1.05 : 0.95, event.clientX, event.clientY);
   }, { passive: false });
 }
 if (els.scaleWidget) {
@@ -4833,9 +4874,13 @@ if (els.scaleWidget) {
     if (!event.deltaY) return;
     event.preventDefault();
     event.stopPropagation();
-    const factor = event.deltaY < 0 ? 1.08 : 0.92;
-    zoomTree(factor);
-    zoomThumbs(factor);
+    const factor = event.deltaY < 0 ? 1.05 : 0.95;
+    const isStageViewing = state.viewMode === "full" || els.pdfViewer?.classList.contains("stage-active");
+    if (isStageViewing && (!els.pdfPageImage.hidden || state.excelWorkbook || state.wordDoc || state.pdfDoc)) {
+      zoomPdf(factor);
+    } else {
+      zoomThumbs(factor);
+    }
   }, { passive: false });
 }
 
@@ -4845,7 +4890,7 @@ els.pdfStage.addEventListener("wheel", (event) => {
   if (!event.ctrlKey || (els.pdfPageImage.hidden && !state.excelWorkbook && !state.wordDoc && !state.pdfDoc)) return;
   event.preventDefault();
   event.stopPropagation();
-  zoomPdf(event.deltaY < 0 ? 1.05 : 0.95);
+  zoomPdf(event.deltaY < 0 ? 1.05 : 0.95, event.clientX, event.clientY);
 }, { passive: false });
 
 // Масштабирование только миниатюр (Ctrl + колёсико над правой лентой)
@@ -4853,7 +4898,7 @@ els.pdfThumbs.addEventListener("wheel", (event) => {
   if (!event.ctrlKey || !event.deltaY) return;
   event.preventDefault();
   event.stopPropagation();
-  zoomThumbs(event.deltaY < 0 ? 1.05 : 0.95);
+  zoomThumbs(event.deltaY < 0 ? 1.05 : 0.95, event.clientX, event.clientY);
 }, { passive: false });
 
 // Панорамирование во 2-м окне (лента миниатюр) левой кнопкой мыши ("рука / лапа")
