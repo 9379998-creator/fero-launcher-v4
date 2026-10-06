@@ -2822,8 +2822,22 @@ function renderPdfDocumentRail() {
       frame.tabIndex = -1;
       preview.append(frame);
     }
+    const pageCount = Number(docItem.pages) || 0;
+    if (pageCount > 1) {
+      const track = document.createElement("div");
+      track.className = "thumb-scrollbar-track";
+      const bar = document.createElement("div");
+      bar.className = "thumb-scrollbar-thumb";
+      track.append(bar);
+      preview.append(track);
+
+      const badge = document.createElement("div");
+      badge.className = "thumb-page-badge";
+      badge.textContent = `${pageCount} стр.`;
+      preview.append(badge);
+    }
     const label = document.createElement("span");
-    label.textContent = docItem.name;
+    label.textContent = pageCount > 1 ? `${docItem.name} (${pageCount} стр.)` : docItem.name;
     thumb.append(preview, label);
     let pdfClickTimer = null;
     thumb.addEventListener("mouseenter", () => {
@@ -3618,6 +3632,7 @@ function setViewerMode(mode) {
   els.shell.classList.toggle("full-view", mode === "full");
   els.viewStandardMode.classList.toggle("active", mode === "standard");
   els.viewFullMode.classList.toggle("active", mode === "full");
+  const showControls = mode === "full" || els.pdfViewer?.classList.contains("stage-active");
   const hideRotate = !showControls || Boolean(state.excelWorkbook) || Boolean(state.wordDoc);
   if (els.viewRotate) els.viewRotate.hidden = hideRotate;
   if (els.viewPanMode) els.viewPanMode.hidden = !showControls;

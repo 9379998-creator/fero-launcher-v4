@@ -1298,6 +1298,46 @@ textarea:focus {
   transform-origin: 0 0;
 }
 
+/* Имитация движка (скроллбара) для многостраничного PDF */
+.pdf-doc-preview .thumb-scrollbar-track {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  background: rgba(0, 0, 0, 0.05);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.pdf-doc-preview .thumb-scrollbar-thumb {
+  position: absolute;
+  top: 6px;
+  right: 1px;
+  width: 5px;
+  height: 38px;
+  background: #9aa0a6;
+  border-radius: 3px;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.2);
+}
+
+/* Бейдж страниц на обложке миниатюры PDF */
+.pdf-doc-preview .thumb-page-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 14px;
+  z-index: 2;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: rgba(30, 41, 59, 0.82);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  pointer-events: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+
 .excel-sheet-frame {
   width: 100%;
   height: 100%;

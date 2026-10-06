@@ -35,6 +35,20 @@
       gap: 20px;
       -webkit-overflow-scrolling: touch;
     }
+    #viewer-container::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    #viewer-container::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    #viewer-container::-webkit-scrollbar-thumb {
+      background: #8e9299;
+      border-radius: 4px;
+    }
+    #viewer-container::-webkit-scrollbar-thumb:hover {
+      background: #c4c6cc;
+    }
     body.pan-mode #viewer-container {
       cursor: grab;
     }
@@ -74,7 +88,7 @@
       user-select: none;
     }
   </style>
-  <script src="../../vendor/pdfjs/pdf.min.js"></script>
+  <script src="/vendor/pdfjs/pdf.min.js"></script>
 </head>
 <body>
   <div id="viewer-container">
@@ -83,7 +97,7 @@
 
   <script>
     if (window.pdfjsLib) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = '../../vendor/pdfjs/pdf.worker.min.js';
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.js';
     }
 
     const container = document.getElementById('viewer-container');
