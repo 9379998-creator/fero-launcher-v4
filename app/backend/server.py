@@ -21,7 +21,7 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -2574,8 +2574,71 @@ def excel_workbook_preview(path: Path) -> dict:
     }
 
 
+def pdf_document_preview(path: Path) -> dict:
+    """Возвращает метаданные PDF и URL быстрой миниатюры 1-й страницы для ленты (по аналогии с Excel и Word)."""
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"PDF-файл не найден: {path}")
+    if path.suffix.casefold() != ".pdf":
+        raise ValueError(f"Это не PDF-файл: {path}")
 
-# PyMuPDF (fitz) дважды ронял процесс при параллельном рендеринге из
+    key = file_cache_key(path, "pdf-doc-v1")
+    target_dir = PDF_CACHE_DIR / key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    thumb_path = target_dir / "thumb.png"
+    manifest_path = target_dir / "meta.json"
+
+    if manifest_path.exists() and thumb_path.exists() and thumb_path.stat().st_size > 0:
+        try:
+            cached_meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if cached_meta.get("path") == str(path) and cached_meta.get("pages"):
+                cached_meta["thumbnailUrl"] = f"/cache/pdf/{key}/thumb.png"
+                cached_meta["rawUrl"] = f"/api/file/raw?path={quote(str(path))}"
+                return cached_meta
+        except Exception:
+            pass
+
+    _FITZ_RENDER_LOCK.acquire()
+    try:
+        import fitz
+        doc = fitz.open(str(path))
+        page_count = len(doc)
+        pages_info = []
+        for idx in range(page_count):
+            p = doc[idx]
+            r = p.rect
+            pages_info.append({
+                "page": idx + 1,
+                "width": round(r.width, 2),
+                "height": round(r.height, 2),
+            })
+        if not thumb_path.exists() or thumb_path.stat().st_size == 0:
+            if page_count > 0:
+                first_page = doc[0]
+                pix = first_page.get_pixmap(dpi=96)
+                pix.save(str(thumb_path))
+        doc.close()
+    except Exception as e:
+        raise RuntimeError(f"Ошибка чтения PDF: {e}")
+    finally:
+        _FITZ_RENDER_LOCK.release()
+
+    meta = {
+        "name": path.name,
+        "path": str(path),
+        "pages": page_count,
+        "pagesInfo": pages_info,
+        "bytes": path.stat().st_size,
+        "cacheKey": key,
+        "thumbnailUrl": f"/cache/pdf/{key}/thumb.png",
+        "rawUrl": f"/api/file/raw?path={quote(str(path))}",
+    }
+    try:
+        manifest_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return meta
+
+
 # нескольких потоков (Application Error, access violation в нативном коде).
 # Весь нативный fitz-рендеринг идёт строго по очереди; кэш-возвраты и
 # Poppler-путь (отдельные процессы) блокировкой не затрагиваются.
@@ -3033,15 +3096,51 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if not target.exists() or not target.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND, "File not found")
                     return
+                file_size = target.stat().st_size
                 content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-                body = target.read_bytes()
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                range_header = self.headers.get("Range")
+
+                if range_header and range_header.startswith("bytes="):
+                    ranges = range_header.removeprefix("bytes=").split("-")
+                    start_str, end_str = ranges[0].strip(), ranges[1].strip() if len(ranges) > 1 else ""
+                    start = int(start_str) if start_str else 0
+                    end = int(end_str) if end_str else file_size - 1
+                    end = min(end, file_size - 1)
+                    if start > end or start >= file_size:
+                        self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                        self.send_header("Content-Range", f"bytes */{file_size}")
+                        self.end_headers()
+                        return
+                    length = end - start + 1
+                    self.send_response(HTTPStatus.PARTIAL_CONTENT)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                    self.send_header("Content-Length", str(length))
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+                    with target.open("rb") as f:
+                        f.seek(start)
+                        remaining = length
+                        while remaining > 0:
+                            chunk = f.read(min(remaining, 65536))
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
+                else:
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(file_size))
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+                    with target.open("rb") as f:
+                        while chunk := f.read(65536):
+                            self.wfile.write(chunk)
             except Exception as error:
-                self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+                try:
+                    self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+                except Exception:
+                    pass
             return
 
         if parsed.path == "/api/dwg/thumbnail":
@@ -3509,6 +3608,17 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if not raw_file:
                     raise ValueError("Не выбран Word-файл для отображения")
                 self.send_json(HTTPStatus.OK, word_document_preview(Path(raw_file)))
+            except Exception as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path in {"/api/pdf/preview", "/api/pdf/document"}:
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                if not raw_file:
+                    raise ValueError("Не выбран PDF-файл для отображения")
+                self.send_json(HTTPStatus.OK, pdf_document_preview(Path(raw_file)))
             except Exception as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return

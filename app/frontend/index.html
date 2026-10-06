@@ -150,6 +150,14 @@
             </div>
             <iframe class="excel-sheet-frame" id="wordDocFrame" title="Документ Word" loading="lazy"></iframe>
           </section>
+          <section class="excel-viewer" id="pdfViewerDoc" hidden aria-label="Просмотр PDF-документа">
+            <div class="excel-book-title" id="pdfDocTitle" title=""></div>
+            <div class="excel-tabs-bar">
+              <button class="excel-tab" id="pdfOpenNative" type="button" title="Открыть в программе по умолчанию">Открыть в PDF</button>
+              <div class="excel-tabs" id="pdfMeta" aria-label="Сведения о документе"></div>
+            </div>
+            <iframe class="excel-sheet-frame" id="pdfDocFrame" title="Документ PDF" loading="lazy"></iframe>
+          </section>
           <div class="viewer-controls" id="viewerControls" hidden>
             <button id="viewOpenNative" type="button" title="Открыть в программе по умолчанию">Открыть</button>
             <button id="viewZoomOut" type="button" title="Уменьшить">−</button>
