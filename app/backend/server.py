@@ -686,33 +686,9 @@ def word_document_preview(path: Path) -> dict:
 
 
 
-def render_word(path: Path, dpi: int = DEFAULT_PDF_DPI, first_page_only: bool = False) -> dict:
-    if not path.exists():
-        return {
-            "name": path.name,
-            "path": str(path),
-            "sourcePath": str(path),
-            "sourceName": path.name,
-            "sourceType": file_extension(path),
-            "dpi": dpi,
-            "pages": 0,
-            "renderedPages": 0,
-            "cacheKey": "",
-            "cacheHit": False,
-            "cacheHitPages": 0,
-            "newRenderedPages": 0,
-            "is_missing": True,
-            "errors": [{"error": f"Документ не найден на диске: {path.name}", "is_missing": True}],
-            "items": [],
-        }
-    pdf_path, convert_cache_hit = word_to_pdf(path)
-    document = render_pdf(pdf_path, dpi=dpi, first_page_only=first_page_only)
-    document["sourcePath"] = str(path)
-    document["sourceName"] = path.name
-    document["sourceType"] = file_extension(path)
-    document["convertedPdfPath"] = str(pdf_path)
-    document["convertCacheHit"] = convert_cache_hit
-    return document
+
+
+
 
 
 _DWG_DAEMON_LOCK = threading.Lock()
@@ -3520,59 +3496,6 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
-        if parsed.path == "/api/word/render":
-            try:
-                body = self.read_json()
-                raw_files = body.get("files", [])
-                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
-                if dpi < 72 or dpi > 600:
-                    raise ValueError("DPI должен быть в диапазоне 72-600")
-                if not isinstance(raw_files, list) or not raw_files:
-                    raise ValueError("Не выбраны Word-файлы для отображения")
-                if len(raw_files) > 10:
-                    raise ValueError("За один раз пока можно отрендерить не больше 10 Word-файлов")
-                first_page_only = bool(body.get("firstPageOnly", False))
-                documents = [render_word(Path(str(file_path)), dpi=dpi, first_page_only=first_page_only) for file_path in raw_files]
-                document_errors = [
-                    {"document": document["name"], "path": document["path"], **error}
-                    for document in documents
-                    for error in document.get("errors", [])
-                ]
-                self.send_json(
-                    HTTPStatus.OK,
-                    {
-                        "dpi": dpi,
-                        "documents": documents,
-                        "totalPages": sum(document["pages"] for document in documents),
-                        "renderedPages": sum(document["renderedPages"] for document in documents),
-                        "errors": document_errors,
-                        "renderedAt": datetime.now().isoformat(timespec="seconds"),
-                    },
-                )
-            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
-                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
-            return
-
-        if parsed.path == "/api/word/page":
-            try:
-                body = self.read_json()
-                raw_file = str(body.get("file", "")).strip()
-                page = int(body.get("page") or 1)
-                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
-                if dpi < 72 or dpi > 600:
-                    raise ValueError("DPI должен быть в диапазоне 72-600")
-                if not raw_file:
-                    raise ValueError("Не выбран Word-файл для отображения")
-                pdf_path, convert_cache_hit = word_to_pdf(Path(raw_file))
-                payload = render_pdf_page(pdf_path, page=page, dpi=dpi)
-                payload["sourcePath"] = raw_file
-                payload["sourceType"] = file_extension(Path(raw_file))
-                payload["convertedPdfPath"] = str(pdf_path)
-                payload["convertCacheHit"] = convert_cache_hit
-                self.send_json(HTTPStatus.OK, payload)
-            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
-                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
-            return
 
         if parsed.path == "/api/dwg/model-render":
             try:

@@ -2293,55 +2293,6 @@ function nativeTypeLabel(ext) {
   return `Файл .${e.toLowerCase()}`;
 }
 
-async function showWordPreviewFast(node, options = {}) {
-  // Быстрый HTML-рендер DOCX через ядро rendering (~1 с вместо ~20 с COM).
-  // При любой ошибке — фолбэк на старый COM-путь через PDF.
-  clearExcelViewer();
-  resetPdfPreview();
-  setActiveNativePath(node.path);
-  state.revealedPath = node.path;
-  if (options.fullView) setViewerMode("full");
-  else setViewerMode("standard");
-  els.pdfViewer.classList.remove("empty");
-  els.pdfPageImage.hidden = true;
-  els.pdfPageImage.removeAttribute("src");
-  els.viewerEmpty.hidden = true;
-  els.viewerControls.hidden = false;
-  els.viewRotate.hidden = true;
-  els.viewPanMode.hidden = true;
-  els.wordDocTitle.textContent = node.name;
-  els.wordDocTitle.title = node.name;
-  els.wordMeta.replaceChildren();
-  els.wordViewer.hidden = false;
-  els.wordOpenNative.onclick = () => openFileByPath(node.path, "native");
-  revealPathInTree(node.path);
-  try {
-    startProgress("Документ Word (быстрое превью)", node.path);
-    const response = await fetch("/api/word/preview", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file: node.path }),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Не удалось построить HTML-превью");
-    state.wordDoc = { path: node.path, name: node.name, ...payload };
-    const chip = document.createElement("span");
-    chip.className = "excel-tab";
-    chip.textContent = `${payload.paragraphs ?? "?"} абз. · ${payload.tables ?? "?"} табл. · ${formatFileSize(payload.bytes)}`;
-    els.wordMeta.append(chip);
-    els.wordDocFrame.src = payload.url;
-    finishProgress("Документ готов");
-  } catch (error) {
-    console.warn("[Launcher] fast Word preview failed, fallback to COM:", error);
-    const item = {
-      ...node,
-      previewType: "WORD",
-      previewFor: { type: "DOCX", name: node.name, path: node.path },
-    };
-    await renderSelectedPdfFiles([item], { singleFile: true, fullView: options.fullView });
-  }
-  if (options.fullView) setViewerMode("full");
-}
 
 async function showNativeAppCard(node, options = {}) {
   // Карточка нативного формата: метаданные из ядра (/api/preview),
@@ -3717,7 +3668,7 @@ async function renderSelectedFiles() {
     await renderExcelWorkbooks(excelItems);
     return;
   }
-  const wordItems = previewItems.filter((item) => item.previewType === "WORD" || isWordNode(item));
+  const wordItems = previewItems.filter((item) => item.previewType === "WORD");
   if (wordItems.length === previewItems.length && wordItems.length <= 10) {
     await renderWordDocuments(wordItems);
     return;
@@ -3847,13 +3798,12 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     if (state.renderEpoch !== myEpoch) return;
 
     const isDwg = itemsToFetch[0]?.previewType === "DWG_MODEL";
-    const isWord = itemsToFetch[0]?.previewType === "WORD";
     const isExcel = itemsToFetch[0]?.previewType === "EXCEL";
     // Облачный диск отвечает медленно: таймаут пачки масштабируем числом
     // файлов (до PDF_FETCH_TIMEOUT_MS), а оборванную по таймауту пачку
     // повторяем один раз — сервер тем временем продолжает рендер и греет
     // кэш, повтор обычно забирает уже готовые страницы.
-    const batchTimeout = isDwg ? 600000 : isWord ? 180000 : isExcel ? 180000
+    const batchTimeout = isDwg ? 600000 : isExcel ? 180000
       : Math.max(180000, Math.min(PDF_FETCH_TIMEOUT_MS, 60000 * Math.max(1, itemsToFetch.length)));
     let controller = null;
     let attempt = 0;
@@ -3873,13 +3823,11 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
       state.operationControllers.push(controller);
       const timeoutId = setTimeout(() => controller.abort(), batchTimeout);
 
-      const endpoint = isWord
-        ? "/api/word/render"
-        : isDwg
-          ? "/api/dwg/model-render"
-          : isExcel
-            ? "/api/excel/render"
-            : "/api/pdf/render";
+      const endpoint = isDwg
+        ? "/api/dwg/model-render"
+        : isExcel
+          ? "/api/excel/render"
+          : "/api/pdf/render";
 
       const requestBody = {
         files: itemsToFetch.map((file) => file.path),
@@ -4087,11 +4035,10 @@ async function loadMorePdfFiles(itemsToRender) {
     }
     let controller = null;
     const isDwg = itemsToFetch[0]?.previewType === "DWG_MODEL";
-    const isWord = itemsToFetch[0]?.previewType === "WORD";
     const isExcel = itemsToFetch[0]?.previewType === "EXCEL";
     // Тот же масштабируемый таймаут и один автоповтор, что в основном показе:
     // облачный диск отвечает медленно, сервер продолжает рендер и греет кэш.
-    const batchTimeout = isDwg ? 600000 : isWord ? 180000 : isExcel ? 180000
+    const batchTimeout = isDwg ? 600000 : isExcel ? 180000
       : Math.min(PDF_FETCH_TIMEOUT_MS, 30000 * Math.max(1, itemsToFetch.length));
     let attempt = 0;
     let batchDone = false;
@@ -4105,11 +4052,9 @@ async function loadMorePdfFiles(itemsToRender) {
       state.operationControllers.push(controller);
       const timeoutId = setTimeout(() => controller.abort(), batchTimeout);
 
-      const endpoint = isWord
-        ? "/api/word/render"
-        : isDwg
-          ? "/api/dwg/model-render"
-          : "/api/pdf/render";
+      const endpoint = isDwg
+        ? "/api/dwg/model-render"
+        : "/api/pdf/render";
 
       const _batchT0 = performance.now();
       const response = await fetch(endpoint, {
@@ -4734,6 +4679,32 @@ window.addEventListener("keydown", (event) => {
       }
       return;
     }
+    if (state.wordDocs?.length > 1 && isThumbsActive) {
+      event.preventDefault();
+      const docs = state.wordDocs;
+      let currentIdx = state.wordDocIndex ?? 0;
+      if (event.key === "ArrowDown") {
+        currentIdx = currentIdx >= 0 && currentIdx < docs.length - 1 ? currentIdx + 1 : 0;
+      } else {
+        currentIdx = currentIdx > 0 ? currentIdx - 1 : docs.length - 1;
+      }
+      const isStage = Boolean(els.pdfViewer?.classList.contains("stage-active"));
+      if (isStage) {
+        activateWordDocument(currentIdx).catch(showOperationError);
+      } else {
+        state.wordDocIndex = currentIdx;
+        renderWordDocumentRail();
+      }
+      const nextDoc = docs[currentIdx];
+      if (nextDoc?.path) {
+        revealPathInTree(nextDoc.path, { skipScroll: false });
+      }
+      const docThumb = els.pdfThumbs?.querySelector(`.word-doc-thumb[data-doc-index="${currentIdx}"]`);
+      if (docThumb) {
+        docThumb.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+      }
+      return;
+    }
     // Иначе (Зона 1 — дерево слева): навигация по списку файлов
     if (inTreeMode()) {
       const files = state.visibleRows.filter((r) => r.type === "file");
@@ -4849,7 +4820,7 @@ function syncRibbonScrollToTree() {
   _ribbonSyncRaf = requestAnimationFrame(() => {
     _ribbonSyncRaf = null;
     if (state.viewMode === "full" || !els.pdfThumbs) return;
-    if (!state.renderedPages?.length && !state.excelWorkbooks?.length) return;
+    if (!state.renderedPages?.length && !state.excelWorkbooks?.length && !state.wordDocs?.length) return;
 
     let targetThumb = null;
     // Если курсор находится над лентой миниатюр — берём миниатюру точно под курсором
@@ -4879,7 +4850,17 @@ function syncRibbonScrollToTree() {
       return;
     }
 
-    // 2. Для PDF-страниц
+    // 2. Для Word-документов
+    if (targetThumb.classList.contains("word-doc-thumb") && targetThumb.dataset.docIndex !== undefined) {
+      const idx = Number(targetThumb.dataset.docIndex);
+      const doc = state.wordDocs?.[idx];
+      if (doc?.path && state.revealedPath !== doc.path) {
+        revealPathInTree(doc.path, { updateSelection: false, skipScroll: false });
+      }
+      return;
+    }
+
+    // 3. Для PDF-страниц
     if (!targetThumb.dataset?.pageKey) return;
     const key = targetThumb.dataset.pageKey;
     const page = state.renderedPages.find((p) => pageKey(p) === key);
@@ -4910,21 +4891,10 @@ document.addEventListener("click", (event) => {
 
 setMode("objects");
 setViewerMode("standard");
-fetch('/api/version')
-  .then(r => r.json())
-  .then(data => {
-    const el = document.getElementById('app-version-badge');
-    if (el) el.textContent = 'v' + data.version;
-  })
-  .catch(() => {
-    const el = document.getElementById('app-version-badge');
-    if (el) el.textContent = 'v3.1.0';
-  });
 
 // Автообновление (Спринт 2): проверка через 3 секунды после загрузки.
 function showUpdateBanner(data) {
-  const badge = document.getElementById('app-version-badge');
-  if (!badge || document.getElementById('update-pill')) return;
+  if (document.getElementById('update-pill')) return;
   const pill = document.createElement('button');
   pill.type = 'button';
   pill.id = 'update-pill';
@@ -4943,7 +4913,7 @@ function showUpdateBanner(data) {
         showToast('Идет загрузка и установка обновления... Лаунчер перезапустится через несколько секунд.');
       });
   });
-  badge.after(pill);
+  if (els.scaleWidget) els.scaleWidget.after(pill);
 }
 
 function checkUpdates() {
