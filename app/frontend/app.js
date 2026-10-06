@@ -109,6 +109,9 @@ const els = {
   wordOpenNative: document.getElementById("wordOpenNative"),
   pdfViewerDoc: document.getElementById("pdfViewerDoc"),
   pdfDocTitle: document.getElementById("pdfDocTitle"),
+  pdfTabs: document.getElementById("pdfTabs"),
+  pdfTabsLeft: document.getElementById("pdfTabsLeft"),
+  pdfTabsRight: document.getElementById("pdfTabsRight"),
   pdfMeta: document.getElementById("pdfMeta"),
   pdfDocFrame: document.getElementById("pdfDocFrame"),
   pdfOpenNative: document.getElementById("pdfOpenNative"),
@@ -2960,6 +2963,37 @@ async function activatePdfDocument(index) {
   els.viewerControls.hidden = false;
   els.viewRotate.hidden = false;
   els.viewPanMode.hidden = false;
+
+  // Отрисовка вкладок листов для DWG/многостраничных PDF (Архитектура «Вариант А»)
+  if (els.pdfTabs) {
+    els.pdfTabs.replaceChildren();
+    const pageCount = Number(docItem.pages) || 0;
+    if (pageCount > 1) {
+      if (els.pdfTabsLeft) els.pdfTabsLeft.hidden = false;
+      els.pdfTabs.hidden = false;
+      if (els.pdfTabsRight) els.pdfTabsRight.hidden = false;
+
+      for (let i = 1; i <= pageCount; i++) {
+        const tabBtn = document.createElement("button");
+        tabBtn.className = "excel-tab" + (i === 1 ? " active" : "");
+        tabBtn.type = "button";
+        tabBtn.dataset.page = String(i);
+        tabBtn.textContent = `Лист ${i}`;
+        tabBtn.title = `Перейти к листу ${i}`;
+        tabBtn.addEventListener("click", () => {
+          [...els.pdfTabs.querySelectorAll(".excel-tab")].forEach((t) => t.classList.remove("active"));
+          tabBtn.classList.add("active");
+          els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-pdf-goto-page", page: i }, "*");
+        });
+        els.pdfTabs.append(tabBtn);
+      }
+    } else {
+      if (els.pdfTabsLeft) els.pdfTabsLeft.hidden = true;
+      els.pdfTabs.hidden = true;
+      if (els.pdfTabsRight) els.pdfTabsRight.hidden = true;
+    }
+  }
+
   const nativeTarget = docItem.nativePath || docItem.path;
   setActiveNativePath(nativeTarget);
   els.pdfOpenNative.onclick = () => openFileByPath(nativeTarget, "native");
@@ -2975,7 +3009,7 @@ async function activatePdfDocument(index) {
   updateViewTransform();
 
   const fileParam = encodeURIComponent(docItem.rawUrl || `/api/file/raw?path=${encodeURIComponent(docItem.path)}`);
-  els.pdfDocFrame.src = `assets/pdf_viewer.html?v=20261006-pdf-fit-v2&file=${fileParam}`;
+  els.pdfDocFrame.src = `assets/pdf_viewer.html?v=20261007-pdf-smooth-v1&file=${fileParam}`;
   forwardPdfDocContextMenu();
 }
 
@@ -4598,6 +4632,24 @@ els.excelTabs.addEventListener("wheel", (event) => {
   event.preventDefault();
   els.excelTabs.scrollLeft += event.deltaY;
 }, { passive: false });
+
+if (els.pdfTabsLeft) {
+  els.pdfTabsLeft.addEventListener("click", () => {
+    els.pdfTabs?.scrollBy({ left: -Math.max(180, els.pdfTabs.clientWidth * .72), behavior: "smooth" });
+  });
+}
+if (els.pdfTabsRight) {
+  els.pdfTabsRight.addEventListener("click", () => {
+    els.pdfTabs?.scrollBy({ left: Math.max(180, els.pdfTabs.clientWidth * .72), behavior: "smooth" });
+  });
+}
+if (els.pdfTabs) {
+  els.pdfTabs.addEventListener("wheel", (event) => {
+    if (!event.shiftKey || !event.deltaY) return;
+    event.preventDefault();
+    els.pdfTabs.scrollLeft += event.deltaY;
+  }, { passive: false });
+}
 els.viewZoomOut.addEventListener("click", () => zoomPdf(0.82));
 els.viewZoomIn.addEventListener("click", () => zoomPdf(1.22));
 // «Вписать» возвращает всё в нормальное состояние: масштаб картинки,
@@ -4793,7 +4845,7 @@ els.pdfStage.addEventListener("wheel", (event) => {
   if (!event.ctrlKey || (els.pdfPageImage.hidden && !state.excelWorkbook && !state.wordDoc && !state.pdfDoc)) return;
   event.preventDefault();
   event.stopPropagation();
-  zoomPdf(event.deltaY < 0 ? 1.12 : 0.89);
+  zoomPdf(event.deltaY < 0 ? 1.05 : 0.95);
 }, { passive: false });
 
 // Масштабирование только миниатюр (Ctrl + колёсико над правой лентой)
@@ -4801,7 +4853,7 @@ els.pdfThumbs.addEventListener("wheel", (event) => {
   if (!event.ctrlKey || !event.deltaY) return;
   event.preventDefault();
   event.stopPropagation();
-  zoomThumbs(event.deltaY < 0 ? 1.15 : 0.87);
+  zoomThumbs(event.deltaY < 0 ? 1.05 : 0.95);
 }, { passive: false });
 
 // Панорамирование во 2-м окне (лента миниатюр) левой кнопкой мыши ("рука / лапа")

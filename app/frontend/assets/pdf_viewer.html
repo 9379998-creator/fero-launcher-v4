@@ -163,19 +163,24 @@
     }
 
     async function renderPage(pageNum) {
-      if (renderedPages.has(pageNum)) {
-        const item = renderedPages.get(pageNum);
-        if (item.renderedScale === currentScale && item.renderedRotation === currentRotation) {
-          return;
-        }
-      }
-
       const pageWrap = document.getElementById('page-wrap-' + pageNum);
       if (!pageWrap) return;
       let canvas = document.getElementById('canvas-' + pageNum);
       if (!canvas) return;
 
-      const page = await pdfDoc.getPage(pageNum);
+      const existing = renderedPages.get(pageNum);
+      if (existing) {
+        if (existing.renderedScale === currentScale && existing.renderedRotation === currentRotation) {
+          return; // Уже отрисован с нужным масштабом и поворотом! Не трогаем canvas.
+        }
+        if (existing.renderTask) {
+          try {
+            existing.renderTask.cancel();
+          } catch (_) {}
+        }
+      }
+
+      const page = (existing && existing.page) ? existing.page : await pdfDoc.getPage(pageNum);
       const rotation = (page.rotate + currentRotation) % 360;
       const dpr = window.devicePixelRatio || 1;
 
@@ -196,15 +201,8 @@
       pageWrap.style.width = Math.floor(cssViewport.width) + 'px';
       pageWrap.style.height = Math.floor(cssViewport.height) + 'px';
 
-      // Если предыдущий рендеринг был в процессе, отменяем его
-      if (renderedPages.has(pageNum)) {
-        const prev = renderedPages.get(pageNum);
-        if (prev.renderTask) {
-          try {
-            prev.renderTask.cancel();
-          } catch (_) {}
-        }
-        // Заменяем canvas новым чистым элементом, чтобы избежать конфликта контекстов при прерывании
+      // Если предыдущая задача рендера была отменена, пересоздаем canvas перед новым рендером
+      if (existing && existing.renderTask) {
         const freshCanvas = document.createElement('canvas');
         freshCanvas.id = 'canvas-' + pageNum;
         canvas.replaceWith(freshCanvas);
@@ -234,13 +232,19 @@
         if (err?.name !== 'RenderingCancelledException') {
           console.error('Page render error:', pageNum, err);
         }
+      } finally {
+        const cur = renderedPages.get(pageNum);
+        if (cur && cur.renderTask === renderTask) {
+          cur.renderTask = null; // Рендер успешно завершён, canvas сохранён
+        }
       }
     }
 
+    let renderScrollTimeout = null;
     function renderVisiblePages() {
       if (!pdfDoc) return;
       const containerRect = container.getBoundingClientRect();
-      const margin = 500; // подгрузка страниц чуть заранее при скролле
+      const margin = 1200; // увеличенный предпросмотр (упреждающая загрузка), чтобы при скролле не было белых листов
 
       for (let i = 1; i <= pdfDoc.numPages; i++) {
         const wrap = document.getElementById('page-wrap-' + i);
@@ -253,7 +257,10 @@
     }
 
     container.addEventListener('scroll', () => {
-      renderVisiblePages();
+      if (renderScrollTimeout) cancelAnimationFrame(renderScrollTimeout);
+      renderScrollTimeout = requestAnimationFrame(() => {
+        renderVisiblePages();
+      });
     }, { passive: true });
 
     window.addEventListener('resize', () => {
@@ -270,6 +277,7 @@
           try {
             item.renderTask.cancel();
           } catch (_) {}
+          item.renderTask = null;
         }
       }
       renderedPages.clear();
@@ -280,14 +288,13 @@
       renderVisiblePages();
     }
 
-    // Wheel zoom with Ctrl: предотвращаем масштабирование всего лаунчера (браузера)
-    // и плавно масштабируем сам PDF-документ
+    // Wheel zoom with Ctrl: мягкое, плавное масштабирование
     window.addEventListener('wheel', (e) => {
       if (!e.ctrlKey) return;
       e.preventDefault();
       e.stopPropagation();
 
-      const factor = e.deltaY < 0 ? 1.15 : 0.87;
+      const factor = e.deltaY < 0 ? 1.05 : 0.95;
       let baseScale = typeof currentScale === 'number' ? currentScale : 1.0;
       if (currentScale === 'fit' || currentScale === 'auto') {
         const firstWrap = container.querySelector('.page-wrapper');
