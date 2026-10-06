@@ -1353,6 +1353,22 @@ async function previewFileDirectly(node, options = {}) {
     return;
   }
 
+  // 1c. DWG (.dwg): быстрый векторный просмотр через парный PDF / accoreconsole и PDF.js
+  if (ext === "DWG") {
+    const dwgItem = {
+      ...node,
+      previewType: "PDF",
+      previewFor: {
+        type: "DWG",
+        name: node.name,
+        path: node.path,
+      },
+    };
+    await renderPdfDocuments([dwgItem], { singleFile: true, fullView: options.fullView });
+    if (options.fullView) setViewerMode("full");
+    return;
+  }
+
   // 2. Если файл уже отрендерен в памяти ЦЕЛИКОМ — мгновенно переключаемся.
   // Если в памяти только титульник (рендер из папки), проваливаемся ниже
   // к полному рендеру, иначе пользователь навсегда останется на 1-й странице.
@@ -2943,9 +2959,10 @@ async function activatePdfDocument(index) {
   els.viewerControls.hidden = false;
   els.viewRotate.hidden = false;
   els.viewPanMode.hidden = false;
-  setActiveNativePath(docItem.path);
-  els.pdfOpenNative.onclick = () => openFileByPath(docItem.path, "native");
-  revealPathInTree(docItem.path);
+  const nativeTarget = docItem.nativePath || docItem.path;
+  setActiveNativePath(nativeTarget);
+  els.pdfOpenNative.onclick = () => openFileByPath(nativeTarget, "native");
+  revealPathInTree(nativeTarget);
   updateViewTransform();
 
   const fileParam = encodeURIComponent(docItem.rawUrl || `/api/file/raw?path=${encodeURIComponent(docItem.path)}`);

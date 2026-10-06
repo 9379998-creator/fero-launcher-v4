@@ -66,6 +66,7 @@ WORD_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_word_to_pdf.ps1"
 EXCEL_XLS_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_xls_to_xlsx.ps1"
 DWG_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_model_space.ps1"
 DWG_SMART_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_smart.ps1"
+DWG_FAST_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_fast.ps1"
 VERSION = "0.4.0-v3-pdf-render"
 APP_VERSION = "3.1.0"
 APP_BRANCH = "dvg-main"
@@ -1011,7 +1012,11 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
         except (OSError, json.JSONDecodeError):
             pass
 
-    script_to_run = DWG_SMART_RENDER_SCRIPT if DWG_SMART_RENDER_SCRIPT.exists() else DWG_RENDER_SCRIPT
+    script_to_run = (
+        DWG_FAST_RENDER_SCRIPT
+        if DWG_FAST_RENDER_SCRIPT.exists()
+        else (DWG_SMART_RENDER_SCRIPT if DWG_SMART_RENDER_SCRIPT.exists() else DWG_RENDER_SCRIPT)
+    )
     final_pdf = None
     try:
         process = dwg_convert_process(
@@ -2585,7 +2590,14 @@ def excel_workbook_preview(path: Path) -> dict:
 def pdf_document_preview(path: Path) -> dict:
     """Возвращает метаданные PDF и URL быстрой миниатюры 1-й страницы для ленты (по аналогии с Excel и Word)."""
     if not path.exists() or not path.is_file():
-        raise FileNotFoundError(f"PDF-файл не найден: {path}")
+        raise FileNotFoundError(f"Файл не найден: {path}")
+
+    original_path = path
+    is_dwg = path.suffix.casefold() == ".dwg"
+    if is_dwg:
+        pdf_path, _ = dwg_to_model_pdf(path)
+        path = pdf_path
+
     if path.suffix.casefold() != ".pdf":
         raise ValueError(f"Это не PDF-файл: {path}")
 
@@ -2601,6 +2613,10 @@ def pdf_document_preview(path: Path) -> dict:
             if cached_meta.get("path") == str(path) and cached_meta.get("pages"):
                 cached_meta["thumbnailUrl"] = f"/cache/pdf/{key}/thumb.png"
                 cached_meta["rawUrl"] = f"/api/file/raw?path={quote(str(path))}"
+                if is_dwg:
+                    cached_meta["name"] = original_path.name
+                    cached_meta["nativePath"] = str(original_path)
+                    cached_meta["sourceType"] = "DWG"
                 return cached_meta
         except Exception:
             pass
@@ -2631,11 +2647,13 @@ def pdf_document_preview(path: Path) -> dict:
         _FITZ_RENDER_LOCK.release()
 
     meta = {
-        "name": path.name,
+        "name": original_path.name if is_dwg else path.name,
         "path": str(path),
+        "nativePath": str(original_path) if is_dwg else str(path),
+        "sourceType": "DWG" if is_dwg else "PDF",
         "pages": page_count,
         "pagesInfo": pages_info,
-        "bytes": path.stat().st_size,
+        "bytes": original_path.stat().st_size if is_dwg else path.stat().st_size,
         "cacheKey": key,
         "thumbnailUrl": f"/cache/pdf/{key}/thumb.png",
         "rawUrl": f"/api/file/raw?path={quote(str(path))}",
