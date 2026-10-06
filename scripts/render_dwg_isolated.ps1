@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory = $false)][string]$OutputPath = "",
   [Parameter(Mandatory = $false)][string]$FallbackCachePath = "",
   [Parameter(Mandatory = $false)][string]$PythonExe = "",
-  [Parameter(Mandatory = $false)][int]$TimeoutPerSheetSec = 180
+  [Parameter(Mandatory = $false)][int]$TimeoutPerSheetSec = 180,
+  [Parameter(Mandatory = $false)][switch]$GenerateHtml
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,6 +52,7 @@ $fileId = [System.BitConverter]::ToString([System.Security.Cryptography.MD5]::Cr
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("FEng_dwg_" + $fileId)
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
 
+$totalSw = [System.Diagnostics.Stopwatch]::StartNew()
 Write-Output ("START_PROCESS input={0} cacheDir={1}" -f $InputPath, $tempDir)
 
 if (-not ([System.Management.Automation.PSTypeName]'LauncherWin32').Type) {
@@ -62,6 +64,42 @@ public class LauncherWin32 {
 }
 "@
 }
+
+if (-not ([System.Management.Automation.PSTypeName]'LauncherMessageFilter').Type) {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport(), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("00000016-0000-0000-C000-000000000046")]
+public interface IOleMessageFilter
+{
+    [PreserveSig] int HandleInComingCall(int dwCallType, IntPtr hTaskCaller, int dwTickCount, IntPtr lpInterfaceInfo);
+    [PreserveSig] int RetryRejectedCall(IntPtr hTaskCallee, int dwTickCount, int dwRejectType);
+    [PreserveSig] int MessagePending(IntPtr hTaskCallee, int dwTickCount, int dwPendingType);
+}
+
+public class LauncherMessageFilter : IOleMessageFilter
+{
+    [DllImport("ole32.dll")] private static extern int CoRegisterMessageFilter(IOleMessageFilter newFilter, out IOleMessageFilter oldFilter);
+    public static void Register() {
+        IOleMessageFilter newFilter = new LauncherMessageFilter();
+        IOleMessageFilter oldFilter = null;
+        CoRegisterMessageFilter(newFilter, out oldFilter);
+    }
+    public static void Revoke() {
+        IOleMessageFilter oldFilter = null;
+        CoRegisterMessageFilter(null, out oldFilter);
+    }
+    public int HandleInComingCall(int dwCallType, IntPtr hTaskCaller, int dwTickCount, IntPtr lpInterfaceInfo) { return 0; }
+    public int RetryRejectedCall(IntPtr hTaskCallee, int dwTickCount, int dwRejectType) {
+        if (dwRejectType == 2) return 100;
+        return -1;
+    }
+    public int MessagePending(IntPtr hTaskCallee, int dwTickCount, int dwPendingType) { return 2; }
+}
+"@
+}
+[LauncherMessageFilter]::Register()
 
 # 1. Discover Layouts via fast AutoCAD COM query (read-only metadata, closes immediately)
 $layouts = @()
@@ -96,7 +134,16 @@ try {
       if ($pidOut -gt 0) { $cadPid = [int]$pidOut }
     } catch {}
     $app.Visible = $false
-    $document = $app.Documents.Open($InputPath, $true)
+    $openAttempts = 0
+    while (-not $document -and $openAttempts -lt 3) {
+      $openAttempts++
+      try {
+        $document = $app.Documents.Open($InputPath, $true)
+      } catch {
+        if ($openAttempts -ge 3) { throw }
+        Start-Sleep -Seconds 5
+      }
+    }
     foreach ($lay in $document.Layouts) {
       if (-not $lay.ModelType -and $lay.Block.Count -gt 1) {
         $layouts += [PSCustomObject]@{
@@ -109,6 +156,7 @@ try {
 } catch {
   Write-Output ("WARN: COM layout discovery failed: {0}" -f $_)
 } finally {
+  try { [LauncherMessageFilter]::Revoke() } catch {}
   if ($document) {
     try { $document.Close($false) } catch {}
     try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($document) | Out-Null } catch {}
@@ -306,11 +354,272 @@ try {
   }
 }
 
+# 6. Generate standalone interactive HTML (always alongside PDF for full DWG HTML viewer experience)
+$htmlDestination = ""
+if ($true) {
+  try {
+    $targetHtmlPath = [System.IO.Path]::ChangeExtension($finalDestination, ".html")
+    $genHtmlScript = @'
+import sys, os, base64, html
+import fitz
+
+pdf_path = sys.argv[1]
+html_out = sys.argv[2]
+doc_title = os.path.basename(sys.argv[3]) if len(sys.argv) > 3 else os.path.basename(pdf_path)
+
+doc = fitz.open(pdf_path)
+page_count = len(doc)
+pages_data = []
+
+for i in range(page_count):
+    page = doc[i]
+    rect = page.rect
+    # 150 DPI render for clear architectural text & mullions
+    pix = page.get_pixmap(matrix=fitz.Matrix(150 / 72.0, 150 / 72.0), alpha=False)
+    img_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
+    pages_data.append({
+        "num": i + 1,
+        "width": rect.width,
+        "height": rect.height,
+        "pix_width": pix.width,
+        "pix_height": pix.height,
+        "img": f"data:image/png;base64,{img_b64}"
+    })
+doc.close()
+
+# Generate self-contained standalone HTML shell
+html_content = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{html.escape(doc_title)}</title>
+<style>
+  :root {{
+    --bg-main: #1e1e24;
+    --bg-panel: #282830;
+    --text-primary: #e6e6eb;
+    --text-secondary: #9a9ab0;
+    --accent: #3a86ff;
+    --accent-hover: #2670e8;
+    --border: #383844;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg-main);
+    color: var(--text-primary);
+    overflow: hidden;
+  }}
+  header {{
+    height: 48px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    z-index: 10;
+  }}
+  .title-group {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }}
+  .badge {{
+    background: var(--accent);
+    color: #fff;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+  }}
+  .doc-title {{
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 50vw;
+  }}
+  .controls {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }}
+  button {{
+    background: #33333d;
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s;
+  }}
+  button:hover {{ background: #40404e; }}
+  .main-layout {{
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }}
+  aside {{
+    width: 220px;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }}
+  .thumb-card {{
+    background: #202026;
+    border: 2px solid transparent;
+    border-radius: 6px;
+    padding: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }}
+  .thumb-card:hover {{ border-color: #555566; }}
+  .thumb-card.active {{ border-color: var(--accent); background: #262a36; }}
+  .thumb-card img {{
+    width: 100%;
+    height: auto;
+    border-radius: 4px;
+    display: block;
+    background: #fff;
+  }}
+  .thumb-label {{
+    font-size: 11px;
+    color: var(--text-secondary);
+    text-align: center;
+    margin-top: 4px;
+  }}
+  main {{
+    flex: 1;
+    overflow: auto;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 24px;
+    background: #18181c;
+  }}
+  .viewport {{
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    align-items: center;
+  }}
+  .page-container {{
+    background: #fff;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    border-radius: 4px;
+    overflow: hidden;
+  }}
+  .page-container img {{
+    display: block;
+    width: 100%;
+    height: auto;
+  }}
+</style>
+</head>
+<body>
+<header>
+  <div class="title-group">
+    <span class="badge">DWG HTML</span>
+    <span class="doc-title">{html.escape(doc_title)}</span>
+  </div>
+  <div class="controls">
+    <span style="font-size: 12px; color: var(--text-secondary);">Страниц: {page_count}</span>
+    <button onclick="window.print()">🖨️ Печать</button>
+  </div>
+</header>
+<div class="main-layout">
+  <aside>
+"""
+
+for p in pages_data:
+    html_content += f"""    <div class="thumb-card" id="thumb-{p['num']}" onclick="scrollToPage({p['num']})">
+      <img src="{p['img']}" loading="lazy" alt="Лист {p['num']}">
+      <div class="thumb-label">Лист {p['num']}</div>
+    </div>
+"""
+
+html_content += f"""  </aside>
+  <main id="scroll-main">
+    <div class="viewport">
+"""
+
+for p in pages_data:
+    html_content += f"""      <div class="page-container" id="page-{p['num']}" style="max-width: min(100%, 1400px);">
+        <img src="{p['img']}" alt="Лист {p['num']}">
+      </div>
+"""
+
+html_content += """    </div>
+  </main>
+</div>
+<script>
+  function scrollToPage(num) {
+    const el = document.getElementById('page-' + num);
+    if (el) el.scrollIntoView({ behavior: 'smooth' });
+    document.querySelectorAll('.thumb-card').forEach(c => c.classList.remove('active'));
+    const thumb = document.getElementById('thumb-' + num);
+    if (thumb) thumb.classList.add('active');
+  }
+</script>
+</body>
+</html>
+"""
+
+with open(html_out, "w", encoding="utf-8") as f:
+    f.write(html_content)
+print(f"HTML written to {html_out} ({len(html_content)} bytes)")
+'@
+    $genPyFile = Join-Path $tempDir "make_html.py"
+    [System.IO.File]::WriteAllText($genPyFile, $genHtmlScript, [System.Text.Encoding]::UTF8)
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $PythonExe
+    $psi.Arguments = "`"$genPyFile`" `"$finalDestination`" `"$targetHtmlPath`" `"$InputPath`""
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+    $psi.RedirectStandardError = $true
+    $pyProc = [System.Diagnostics.Process]::Start($psi)
+    $pyProc.WaitForExit(180000)
+    if ($pyProc.ExitCode -eq 0 -and (Test-Path -LiteralPath $targetHtmlPath)) {
+      $htmlDestination = $targetHtmlPath
+      Write-Output ("HTML_GENERATED path={0}" -f $htmlDestination)
+    }
+  } catch {
+    Write-Output ("WARN: HTML generation failed: {0}" -f $_)
+  }
+}
+
+$totalSw.Stop()
+$elapsedSec = [math]::Round($totalSw.ElapsedMilliseconds / 1000.0, 1)
+$elapsedMin = [math]::Floor($elapsedSec / 60)
+$remSec = [math]::Round($elapsedSec % 60, 1)
+$timeFormatted = ("{0} мин {1} сек" -f $elapsedMin, $remSec)
+
 $result = @{
   ok = $true
   finalPath = $finalDestination
   isLocalFolder = ($finalDestination -eq $OutputPath)
   pageCount = $pagePdfPaths.Count
   mode = "accoreconsole_1sheet_per_proc"
+  elapsedSeconds = $elapsedSec
+  elapsedFormatted = $timeFormatted
+  timePerSheetSec = if ($pagePdfPaths.Count -gt 0) { [math]::Round($elapsedSec / $pagePdfPaths.Count, 1) } else { 0 }
+  htmlPath = $htmlDestination
 }
+Write-Output ("COMPLETED in {0} ({1}s total, ~{2}s per sheet)" -f $timeFormatted, $elapsedSec, $result.timePerSheetSec)
 Write-Output ($result | ConvertTo-Json -Compress)

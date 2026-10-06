@@ -2646,6 +2646,9 @@ def pdf_document_preview(path: Path) -> dict:
     finally:
         _FITZ_RENDER_LOCK.release()
 
+    paired_html = path.with_suffix(".html")
+    has_html = paired_html.exists() and paired_html.is_file() and paired_html.stat().st_size > 0
+
     meta = {
         "name": original_path.name if is_dwg else path.name,
         "path": str(path),
@@ -2657,6 +2660,8 @@ def pdf_document_preview(path: Path) -> dict:
         "cacheKey": key,
         "thumbnailUrl": f"/cache/pdf/{key}/thumb.png",
         "rawUrl": f"/api/file/raw?path={quote(str(path))}",
+        "htmlPath": str(paired_html) if has_html else None,
+        "htmlUrl": f"/api/file/raw?path={quote(str(paired_html))}" if has_html else None,
     }
     try:
         manifest_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

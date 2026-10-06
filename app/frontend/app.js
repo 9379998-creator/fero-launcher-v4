@@ -112,6 +112,7 @@ const els = {
   pdfMeta: document.getElementById("pdfMeta"),
   pdfDocFrame: document.getElementById("pdfDocFrame"),
   pdfOpenNative: document.getElementById("pdfOpenNative"),
+  pdfOpenHtml: document.getElementById("pdfOpenHtml"),
   viewerEmpty: document.getElementById("viewerEmpty"),
   viewerControls: document.getElementById("viewerControls"),
   qualityBadge: document.getElementById("qualityBadge"),
@@ -2962,6 +2963,14 @@ async function activatePdfDocument(index) {
   const nativeTarget = docItem.nativePath || docItem.path;
   setActiveNativePath(nativeTarget);
   els.pdfOpenNative.onclick = () => openFileByPath(nativeTarget, "native");
+  if (els.pdfOpenHtml) {
+    if (docItem.htmlPath) {
+      els.pdfOpenHtml.hidden = false;
+      els.pdfOpenHtml.onclick = () => openFileByPath(docItem.htmlPath, "system");
+    } else {
+      els.pdfOpenHtml.hidden = true;
+    }
+  }
   revealPathInTree(nativeTarget);
   updateViewTransform();
 
@@ -5532,6 +5541,20 @@ function showFileContextMenu(clientX, clientY, target) {
       label: "Открыть в программе по умолчанию",
       run: () => openFileByPath(target.path, "native"),
     });
+    const extUpper = (target.ext || extOfPath(target.path) || "").toUpperCase().replace(".", "");
+    if (extUpper === "DWG" || extUpper === "PDF") {
+      const htmlPath = target.path.replace(/\.[^./\\]+$/, ".html");
+      items.push({
+        label: "Открыть интерактивный HTML в браузере",
+        run: async () => {
+          try {
+            await openFileByPath(htmlPath, "system");
+          } catch (_) {
+            showToast("HTML-файл ещё не создан (сгенерируйте просмотр чертежа)");
+          }
+        },
+      });
+    }
     items.push({ sep: true });
   }
   items.push({
