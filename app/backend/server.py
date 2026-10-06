@@ -648,16 +648,40 @@ def word_to_pdf(path: Path) -> tuple[Path, bool]:
 
 
 def word_preview_html(path: Path) -> dict:
-    """Быстрый DOCX->HTML через ядро rendering (~1 с вместо ~20 с COM)."""
+    """Быстрый HTML-просмотр Word через ядро rendering (DOCX напрямую, .doc через fallback)."""
     if _engine_word is None:
         raise RuntimeError("Ядро rendering недоступно (app.rendering.engine_word)")
-    if not path.is_file() or path.suffix.casefold() != ".docx":
-        raise ValueError(f"Быстрый HTML-просмотр поддерживает DOCX: {path.name}")
-    key = file_cache_key(path, "word-html")
-    meta = _engine_word.ensure_docx_preview(path, WORD_CACHE_DIR / "html" / key)
-    meta = dict(meta)
-    meta["url"] = f"/cache/word/html/{key}/preview.html"
-    return {"name": path.name, "path": str(path), "cacheKey": key, **meta}
+    if not path.is_file():
+        raise FileNotFoundError(f"Файл не найден: {path}")
+    ext = path.suffix.casefold()
+    if ext == ".docx":
+        key = file_cache_key(path, "word-html")
+        meta = _engine_word.ensure_docx_preview(path, WORD_CACHE_DIR / "html" / key)
+        meta = dict(meta)
+        meta["url"] = f"/cache/word/html/{key}/preview.html"
+        return {"name": path.name, "path": str(path), "cacheKey": key, "thumbnailUrl": meta["url"], **meta}
+    elif ext in {".doc", ".rtf"}:
+        # Для .doc/.rtf рендерим PDF и отдаем первую страницу или конвертируем
+        pdf_path, _ = word_to_pdf(path)
+        doc = render_pdf(pdf_path, dpi=DEFAULT_PDF_DPI, first_page_only=True)
+        first_img = doc["items"][0]["url"] if doc.get("items") else ""
+        return {
+            "name": path.name,
+            "path": str(path),
+            "cacheKey": file_cache_key(path, "word-doc"),
+            "url": first_img,
+            "thumbnailUrl": first_img,
+            "paragraphs": 0,
+            "tables": 0,
+            "bytes": path.stat().st_size,
+        }
+    raise ValueError(f"Формат Word не поддерживается: {path.name}")
+
+
+def word_document_preview(path: Path) -> dict:
+    """Полное описание документа Word для HTML-просмотра и ленты (по аналогии с excel_workbook_preview)."""
+    return word_preview_html(path)
+
 
 
 
@@ -3716,13 +3740,13 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
-        if parsed.path == "/api/word/preview":
+        if parsed.path in {"/api/word/preview", "/api/word/document"}:
             try:
                 body = self.read_json()
                 raw_file = str(body.get("file", "")).strip()
                 if not raw_file:
                     raise ValueError("Не выбран Word-файл для отображения")
-                self.send_json(HTTPStatus.OK, word_preview_html(Path(raw_file)))
+                self.send_json(HTTPStatus.OK, word_document_preview(Path(raw_file)))
             except Exception as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return

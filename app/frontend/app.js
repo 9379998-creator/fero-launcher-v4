@@ -33,6 +33,9 @@ const state = {
   excelSheetIndex: 0,
   excelScale: 1,
   wordDoc: null,
+  wordDocs: [],
+  wordDocIndex: 0,
+  wordScale: 1,
   highQualityPages: new Map(),
   pdfPairIndex: new Map(),
   pairless: false,
@@ -1259,6 +1262,22 @@ function syncSelectionToPreview(fileNode) {
     }
   }
 
+  // 2a. Проверяем открытые документы Word
+  if (state.wordDocs?.length) {
+    const docIndex = state.wordDocs.findIndex((doc) => {
+      const docPath = (doc.path || doc.sourcePath || "").replace(/\//g, "\\").toLowerCase();
+      return docPath === norm;
+    });
+    if (docIndex >= 0) {
+      activateWordDocument(docIndex);
+      const docThumb = els.pdfThumbs?.querySelector(`.word-doc-thumb[data-doc-index="${docIndex}"]`);
+      if (docThumb) {
+        docThumb.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+      }
+      return;
+    }
+  }
+
   // 3. Если файл ещё не отрендерен — не блокируем дерево фоновым рендером.
   // Для полного открытия файла служит двойной щелчок, а для пакета — кнопка «Отобразить».
 }
@@ -1293,9 +1312,19 @@ async function previewFileDirectly(node, options = {}) {
     return;
   }
 
-  // 1a. DOCX: быстрый HTML через ядро rendering (без Word COM).
-  if (ext === "DOCX") {
-    await showWordPreviewFast(node, options);
+  // 1a. Word (.docx, .doc, .rtf): быстрый HTML через ядро rendering (Word-HTML).
+  if (["DOCX", "DOC", "RTF"].includes(ext)) {
+    const wordItem = {
+      ...node,
+      previewType: "WORD",
+      previewFor: {
+        type: ext,
+        name: node.name,
+        path: node.path,
+      },
+    };
+    await renderWordDocuments([wordItem], { singleFile: true, fullView: options.fullView });
+    if (options.fullView) setViewerMode("full");
     return;
   }
 
@@ -1405,6 +1434,8 @@ function updateRailSelectionHighlight() {
     try {
       if (thumb.classList.contains("excel-book-thumb") && thumb.dataset.workbookIndex !== undefined) {
         p = state.excelWorkbooks?.[Number(thumb.dataset.workbookIndex)]?.path || "";
+      } else if (thumb.classList.contains("word-doc-thumb") && thumb.dataset.docIndex !== undefined) {
+        p = state.wordDocs?.[Number(thumb.dataset.docIndex)]?.path || "";
       } else if (thumb.dataset.pageKey) {
         const page = state.renderedPages.find((x) => {
           try { return pageKey(x) === thumb.dataset.pageKey; } catch (_) { return false; }
@@ -2234,6 +2265,9 @@ function clearExcelViewer() {
 
 function clearWordViewer() {
   state.wordDoc = null;
+  state.wordDocs = [];
+  state.wordDocIndex = 0;
+  state.wordScale = 1;
   if (els.wordViewer) els.wordViewer.hidden = true;
   if (els.wordDocTitle) { els.wordDocTitle.textContent = ""; els.wordDocTitle.title = ""; }
   if (els.wordMeta) els.wordMeta.replaceChildren();
@@ -2355,7 +2389,11 @@ function resetPdfPreview() {
   state.activePageUrl = "";
   state.renderedPages = [];
   state.activeTxtPath = "";
+  state.wordDoc = null;
+  state.wordDocs = [];
+  state.wordDocIndex = 0;
   if (els.txtViewer) els.txtViewer.hidden = true;
+  if (els.wordViewer) els.wordViewer.hidden = true;
   // Новый показ стирает ленту целиком: старые миниатюры не смешиваются с новыми.
   els.pdfThumbs.replaceChildren();
   els.pdfPageImage.hidden = true;
@@ -2610,6 +2648,152 @@ async function showExcelWorkbooks(workbooks, options = {}) {
   if (options.isSingle || workbooks.length === 1) {
     setStageActive(true);
     await activateExcelWorkbook(0);
+    if (options.fullView) setViewerMode("full");
+  } else {
+    setStageActive(false);
+    if (els.excelViewer) els.excelViewer.hidden = true;
+    if (els.wordViewer) els.wordViewer.hidden = true;
+  }
+}
+
+function renderWordDocumentRail() {
+  const existingThumbs = els.pdfThumbs.querySelectorAll(".word-doc-thumb");
+  if (existingThumbs.length === state.wordDocs.length && existingThumbs.length > 0) {
+    existingThumbs.forEach((thumb, index) => {
+      thumb.classList.toggle("active", index === state.wordDocIndex);
+    });
+    updateRailSelectionHighlight();
+    return;
+  }
+  els.pdfThumbs.replaceChildren();
+  state.wordDocs.forEach((docItem, index) => {
+    const wrap = document.createElement("div");
+    wrap.className = "thumb-wrap";
+    const thumb = document.createElement("button");
+    thumb.type = "button";
+    thumb.className = "pdf-thumb word-doc-thumb";
+    thumb.dataset.docIndex = String(index);
+    thumb.classList.toggle("active", index === state.wordDocIndex);
+    thumb.title = docItem.name;
+    const preview = document.createElement("div");
+    preview.className = "word-doc-preview";
+    const frame = document.createElement("iframe");
+    frame.src = docItem.thumbnailUrl || docItem.url || "about:blank";
+    frame.title = `Миниатюра ${docItem.name}`;
+    frame.tabIndex = -1;
+    preview.append(frame);
+    const label = document.createElement("span");
+    label.textContent = docItem.name;
+    thumb.append(preview, label);
+    let wordClickTimer = null;
+    thumb.addEventListener("mouseenter", () => {
+      state.activeNavZone = "thumbs";
+      if (docItem.path) {
+        revealPathInTree(docItem.path, { skipScroll: false });
+      }
+    });
+    thumb.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.activeNavZone = "thumbs";
+      thumb.focus();
+      if (docItem.path) selectRailPath(docItem.path, event);
+      if (event.shiftKey || event.ctrlKey || event.metaKey) return;
+      if (wordClickTimer) return;
+      wordClickTimer = setTimeout(() => {
+        wordClickTimer = null;
+        activateWordDocument(index).catch(showOperationError);
+      }, 220);
+    });
+    thumb.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      if (wordClickTimer) {
+        clearTimeout(wordClickTimer);
+        wordClickTimer = null;
+      }
+      activateWordDocument(index).catch(showOperationError);
+      setViewerMode("full");
+    });
+    wrap.append(thumb);
+    wrap.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showFileContextMenu(event.clientX, event.clientY, {
+        path: docItem.path || "",
+        isDir: false,
+        ext: extOfPath(docItem.path || ""),
+      });
+    });
+    els.pdfThumbs.append(wrap);
+  });
+  updateRailSelectionHighlight();
+}
+
+function forwardWordDocContextMenu() {
+  let doc = null;
+  try {
+    doc = els.wordDocFrame?.contentDocument;
+  } catch (_) {
+    return;
+  }
+  if (!doc || doc.__launcherCtxForwarded) return;
+  try {
+    doc.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      try { event.stopPropagation(); } catch (_) {}
+      hideFileContextMenu();
+      const info = getActiveSourceInfo();
+      const currentDoc = state.wordDoc;
+      const path = (info && info.path) || (currentDoc && currentDoc.path) || "";
+      if (!path) return;
+      showFileContextMenu(event.clientX, event.clientY, { path, isDir: false, ext: extOfPath(path) });
+    });
+    doc.__launcherCtxForwarded = true;
+  } catch (_) {}
+}
+
+async function activateWordDocument(index) {
+  const docItem = state.wordDocs[index];
+  if (!docItem) return;
+  setStageActive(true);
+  state.wordDoc = docItem;
+  state.wordDocIndex = index;
+  state.wordScale = 1;
+  els.wordDocTitle.textContent = docItem.name;
+  els.wordDocTitle.title = docItem.name;
+  renderWordDocumentRail();
+  els.pdfViewer.classList.remove("empty");
+  els.pdfPageImage.hidden = true;
+  els.pdfPageImage.removeAttribute("src");
+  els.viewerEmpty.hidden = true;
+  els.qualityBadge.hidden = true;
+  els.wordMeta.replaceChildren();
+  const chip = document.createElement("span");
+  chip.className = "excel-tab";
+  chip.textContent = `${docItem.paragraphs ?? "?"} абз. · ${docItem.tables ?? "?"} табл. · ${formatFileSize(docItem.bytes)}`;
+  els.wordMeta.append(chip);
+
+  if (els.excelViewer) els.excelViewer.hidden = true;
+  els.wordViewer.hidden = false;
+  els.viewerControls.hidden = false;
+  els.viewRotate.hidden = true;
+  els.viewPanMode.hidden = true;
+  setActiveNativePath(docItem.path);
+  els.wordOpenNative.onclick = () => openFileByPath(docItem.path, "native");
+  revealPathInTree(docItem.path);
+  updateViewTransform();
+
+  els.wordDocFrame.src = docItem.url;
+  forwardWordDocContextMenu();
+}
+
+async function showWordDocuments(documents, options = {}) {
+  state.wordDocs = documents;
+  renderWordDocumentRail();
+  els.pdfViewer?.classList.remove("empty");
+  if (els.viewerEmpty) els.viewerEmpty.hidden = true;
+  if (options.isSingle || documents.length === 1) {
+    setStageActive(true);
+    await activateWordDocument(0);
     if (options.fullView) setViewerMode("full");
   } else {
     setStageActive(false);
@@ -3215,6 +3399,11 @@ function zoomPdf(factor) {
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.excelScale }, "*");
     return;
   }
+  if (state.wordDoc) {
+    state.wordScale = Math.min(3, Math.max(0.35, (state.wordScale || 1) * factor));
+    els.wordDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.wordScale }, "*");
+    return;
+  }
   if (els.pdfPageImage.hidden) return;
   state.view.scale = Math.min(8, Math.max(0.05, state.view.scale * factor));
   state.view.userZoomed = true;
@@ -3447,6 +3636,75 @@ async function renderExcelWorkbooks(excelFiles, options = {}) {
   finishProgress(failed.length ? `${doneText} · ошибок: ${failed.length}` : doneText);
 }
 
+async function renderWordDocuments(wordFiles, options = {}) {
+  setTreeBrowseMode(false);
+  const isSingle = Boolean(options.singleFile) || wordFiles.length === 1;
+  if (options.fullView) {
+    setViewerMode("full");
+  } else if (state.viewMode !== "full") {
+    setViewerMode("standard");
+  }
+  setStageActive(isSingle);
+  resetPdfPreview();
+  startProgress("Подготовка Word", `${wordFiles.length} документов · HTML-просмотр`);
+  state.progressEase = {
+    base: 8,
+    spent0: Date.now(),
+    estMs: 30000,
+  };
+  const documents = [];
+  const failed = [];
+  for (let index = 0; index < wordFiles.length; index += 1) {
+    if (state.progressCancelled) {
+      return;
+    }
+    const wordFile = wordFiles[index];
+    els.progressDetail.textContent = `Документ ${index + 1} из ${wordFiles.length}: ${wordFile.name} — читается…`;
+    const controller = createOperationController();
+    const timeoutSec = 60;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutSec * 1000);
+    try {
+      const response = await fetch("/api/word/document", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file: wordFile.path }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (state.progressCancelled) return;
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `Не удалось прочитать файл: ${wordFile.name}`);
+      documents.push({ path: wordFile.path, name: wordFile.name, ...payload });
+      const doneShare = documents.length / wordFiles.length;
+      state.progressShown = Math.max(state.progressShown || 0, 8 + doneShare * 80);
+      state.progressEase = {
+        base: state.progressShown,
+        spent0: Date.now(),
+        estMs: 30000,
+      };
+      els.progressDetail.textContent = `Готово ${documents.length} из ${wordFiles.length}: ${wordFile.name}`;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (state.progressCancelled) return;
+      const isTimeout = err?.name === "AbortError";
+      const errMsg = isTimeout
+        ? `Не удалось прочитать файл (превышено время ожидания ${timeoutSec} с)`
+        : (err?.message || `Не удалось прочитать файл: ${wordFile.name}`);
+      failed.push(`${wordFile.name}: ${errMsg}`);
+      els.progressDetail.textContent = `Ошибка в документе ${index + 1} из ${wordFiles.length}: ${wordFile.name} — пропускаем`;
+    }
+  }
+  if (state.progressCancelled) return;
+  if (!documents.length) {
+    const firstError = failed[0] || `Не удалось прочитать файл: ${wordFiles[0]?.name || "Word"}`;
+    showOperationError(new Error(firstError));
+    return;
+  }
+  await showWordDocuments(documents, { isSingle, fullView: options.fullView });
+  const doneText = `Готово ${documents.length} из ${wordFiles.length} документов Word`;
+  finishProgress(failed.length ? `${doneText} · ошибок: ${failed.length}` : doneText);
+}
+
 async function renderSelectedFiles() {
   const previewItems = collectPreviewFilesForDisplay();
   if (!previewItems.length) {
@@ -3457,6 +3715,11 @@ async function renderSelectedFiles() {
   const excelItems = previewItems.filter((item) => item.previewType === "EXCEL");
   if (excelItems.length === previewItems.length && excelItems.length <= 10) {
     await renderExcelWorkbooks(excelItems);
+    return;
+  }
+  const wordItems = previewItems.filter((item) => item.previewType === "WORD" || isWordNode(item));
+  if (wordItems.length === previewItems.length && wordItems.length <= 10) {
+    await renderWordDocuments(wordItems);
     return;
   }
   await renderSelectedPdfFiles(previewItems);
@@ -3981,6 +4244,12 @@ els.backToTree.addEventListener("click", () => {
       if (els.wordViewer) els.wordViewer.hidden = true;
       els.pdfViewer?.classList.remove("empty");
       renderExcelWorkbookRail();
+    } else if (state.wordDocs?.length > 1 && els.wordViewer) {
+      setStageActive(false);
+      els.wordViewer.hidden = true;
+      if (els.excelViewer) els.excelViewer.hidden = true;
+      els.pdfViewer?.classList.remove("empty");
+      renderWordDocumentRail();
     }
     return;
   }
@@ -3991,6 +4260,11 @@ els.backToTree.addEventListener("click", () => {
       if (els.wordViewer) els.wordViewer.hidden = true;
       els.pdfViewer?.classList.remove("empty");
       renderExcelWorkbookRail();
+    } else if (state.wordDocs?.length > 1 && els.wordViewer) {
+      els.wordViewer.hidden = true;
+      if (els.excelViewer) els.excelViewer.hidden = true;
+      els.pdfViewer?.classList.remove("empty");
+      renderWordDocumentRail();
     }
     return;
   }
@@ -4026,7 +4300,8 @@ if (els.viewOpenNative) {
   els.viewOpenNative.addEventListener("click", () => {
     const info = getActiveSourceInfo();
     const wb = state.excelWorkbook;
-    const targetPath = (info && info.path) || (wb && wb.path) || state.activeNativePath || "";
+    const wordDoc = state.wordDoc;
+    const targetPath = (info && info.path) || (wb && wb.path) || (wordDoc && wordDoc.path) || state.activeNativePath || "";
     if (targetPath) {
       openFileByPath(targetPath, "native");
     }
@@ -4038,6 +4313,12 @@ els.viewFit.addEventListener("click", () => {
     state.view.rotation = 0;
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: 0 }, "*");
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
+    return;
+  }
+  if (state.wordDoc) {
+    state.wordScale = 1;
+    els.wordDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: 1 }, "*");
+    els.wordDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
     return;
   }
   if (state.viewMode === "medium") {
@@ -4318,16 +4599,26 @@ function handleGlobalEscape() {
       if (els.wordViewer) els.wordViewer.hidden = true;
       els.pdfViewer?.classList.remove("empty");
       renderExcelWorkbookRail();
+    } else if (state.wordDocs?.length > 1 && els.wordViewer) {
+      setStageActive(false);
+      els.wordViewer.hidden = true;
+      if (els.excelViewer) els.excelViewer.hidden = true;
+      els.pdfViewer?.classList.remove("empty");
+      renderWordDocumentRail();
     }
     return;
   }
   // 1.1. Если открыта сцена отдельного документа/таблицы из ленты — возвращаемся к ленте миниатюр
-  if (els.pdfViewer?.classList.contains("stage-active") && (state.renderedPages?.length > 1 || state.excelWorkbooks?.length > 1)) {
+  if (els.pdfViewer?.classList.contains("stage-active") && (state.renderedPages?.length > 1 || state.excelWorkbooks?.length > 1 || state.wordDocs?.length > 1)) {
     setStageActive(false);
     if (els.excelViewer) els.excelViewer.hidden = true;
     if (els.wordViewer) els.wordViewer.hidden = true;
     els.pdfViewer?.classList.remove("empty");
-    renderExcelWorkbookRail();
+    if (state.wordDocs?.length > 1) {
+      renderWordDocumentRail();
+    } else {
+      renderExcelWorkbookRail();
+    }
     return;
   }
   // 2. В режиме дерева:

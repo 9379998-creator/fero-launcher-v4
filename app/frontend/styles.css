@@ -1008,11 +1008,12 @@ textarea:focus {
   overflow-x: hidden;
 }
 
-.shell:not(.full-view) .pdf-viewer .pdf-stage:not(:has(.excel-viewer:not([hidden]))) {
+.shell:not(.full-view) .pdf-viewer .pdf-stage:not(:has(.excel-viewer:not([hidden]))):not(:has(#wordViewer:not([hidden]))) {
   display: none !important;
 }
 
-.shell:not(.full-view) .pdf-viewer .pdf-stage:has(.excel-viewer:not([hidden])) {
+.shell:not(.full-view) .pdf-viewer .pdf-stage:has(.excel-viewer:not([hidden])),
+.shell:not(.full-view) .pdf-viewer .pdf-stage:has(#wordViewer:not([hidden])) {
   display: block !important;
   position: relative;
   width: 100%;
@@ -1270,11 +1271,13 @@ textarea:focus {
 }
 
 
-.excel-book-thumb {
+.excel-book-thumb,
+.word-doc-thumb {
   text-align: left;
 }
 
-.excel-book-preview {
+.excel-book-preview,
+.word-doc-preview {
   position: relative;
   width: 100%;
   height: min(480px, 70vh);
@@ -1283,7 +1286,8 @@ textarea:focus {
   background: var(--paper);
 }
 
-.excel-book-preview iframe {
+.excel-book-preview iframe,
+.word-doc-preview iframe {
   position: absolute;
   top: 0;
   left: 0;
