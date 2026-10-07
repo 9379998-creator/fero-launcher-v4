@@ -284,6 +284,7 @@ button:disabled {
 .progress-track span.is-error { background: #b45757; }
 
 .txt-viewer {
+  cursor: auto;
   width: 100%;
   height: 100%;
   overflow: auto;
@@ -1090,8 +1091,10 @@ textarea:focus {
 
 .pdf-thumb img {
   display: block;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   max-height: calc(480px * var(--thumb-scale, 1));
+  margin: 0 auto;
   object-fit: contain;
   border: 1px solid #d4d7dc;
   background: #fff;
@@ -1177,6 +1180,7 @@ textarea:focus {
 }
 
 .excel-viewer {
+  cursor: default;
   position: absolute;
   inset: 0;
   display: grid;
@@ -1292,11 +1296,11 @@ textarea:focus {
   background: var(--paper);
 }
 
-.pdf-stage.pan-mode {
+.pdf-stage {
   cursor: grab;
 }
 
-.pdf-stage.pan-mode.dragging {
+.pdf-stage.dragging {
   cursor: grabbing;
 }
 
@@ -1329,23 +1333,12 @@ textarea:focus {
   border-radius: 2px;
   font-size: 12px;
   font-weight: 400;
+  cursor: pointer;
 }
 
 #viewFit {
   min-width: 70px;
   white-space: nowrap;
-}
-
-.hand-icon {
-  display: block;
-  width: 17px;
-  height: 17px;
-  margin: auto;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.25;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .viewer-controls button.active {
@@ -1399,6 +1392,7 @@ textarea:focus {
 }
 
 .viewer-empty {
+  cursor: default;
   max-width: 460px;
   padding: 18px 20px;
   border: 1px solid var(--line);

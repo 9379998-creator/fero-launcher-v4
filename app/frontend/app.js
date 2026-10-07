@@ -110,13 +110,8 @@ const els = {
   viewZoomOut: document.getElementById("viewZoomOut"),
   viewZoomIn: document.getElementById("viewZoomIn"),
   viewFit: document.getElementById("viewFit"),
-  viewRotate: document.getElementById("viewRotate"),
   viewOpenNative: document.getElementById("viewOpenNative"),
-  viewPanMode: document.getElementById("viewPanMode"),
   contextMenu: document.getElementById("contextMenu"),
-  viewStandardMode: document.getElementById("viewStandardMode"),
-  viewMediumMode: document.getElementById("viewMediumMode"),
-  viewFullMode: document.getElementById("viewFullMode"),
   scaleWidget: document.getElementById("scaleWidget"),
   scaleResetBtn: document.getElementById("scaleResetBtn"),
   scaleMinusBtn: document.getElementById("scaleMinusBtn"),
@@ -2575,8 +2570,6 @@ async function activateExcelWorkbook(index) {
   els.excelViewer.hidden = false;
   if (els.wordViewer) els.wordViewer.hidden = true;
   els.viewerControls.hidden = false;
-  els.viewRotate.hidden = true;
-  els.viewPanMode.hidden = false;
   setActiveNativePath(workbook.path);
   revealPathInTree(workbook.path);
   updateViewTransform();
@@ -2719,8 +2712,6 @@ async function activateWordDocument(index) {
   if (els.excelViewer) els.excelViewer.hidden = true;
   els.wordViewer.hidden = false;
   els.viewerControls.hidden = false;
-  els.viewRotate.hidden = true;
-  els.viewPanMode.hidden = true;
   setActiveNativePath(docItem.path);
   els.wordOpenNative.onclick = () => openFileByPath(docItem.path, "native");
   revealPathInTree(docItem.path);
@@ -3036,6 +3027,8 @@ function extOfPath(path) {
   return dot > 0 ? base.slice(dot + 1).toUpperCase() : "";
 }
 
+let activeHighQualityController = null;
+
 async function requestHighQualityPage(page) {
   if (!page.documentPath || !page.page || page.dpi >= PDF_QUALITY_DPI) return;
   const key = pageKey(page);
@@ -3044,11 +3037,17 @@ async function requestHighQualityPage(page) {
     if (state.activePageKey === key) {
       state.activePageUrl = cached.url;
       els.pdfPageImage.src = cached.url;
-        }
+    }
     return;
   }
-  if (state.activePageKey === key) {
-    }
+
+  if (activeHighQualityController) {
+    activeHighQualityController.abort();
+    activeHighQualityController = null;
+  }
+  const controller = new AbortController();
+  activeHighQualityController = controller;
+
   try {
     const endpoint = page.previewType === "DWG_MODEL"
       ? "/api/dwg/model-page"
@@ -3060,6 +3059,7 @@ async function requestHighQualityPage(page) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ file: sourceFile, page: page.page, dpi: PDF_QUALITY_DPI }),
+      signal: controller.signal,
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "PDF page render failed");
@@ -3074,10 +3074,14 @@ async function requestHighQualityPage(page) {
     if (state.activePageKey === key) {
       state.activePageUrl = highPage.url;
       els.pdfPageImage.src = highPage.url;
-        }
+    }
   } catch (error) {
-    if (state.activePageKey === key) {
-        }
+    if (error.name === "AbortError") return;
+    // Молча оставляем базовое разрешение, если не удалось подгрузить высокое
+  } finally {
+    if (activeHighQualityController === controller) {
+      activeHighQualityController = null;
+    }
   }
 }
 
@@ -3154,8 +3158,6 @@ function showPdfPage(page, options = {}) {
     els.viewerEmpty.hidden = true;
     els.pdfViewer.classList.remove("empty");
     els.viewerControls.hidden = false;
-    els.viewRotate.hidden = false;
-    els.viewPanMode.hidden = false;
     updateActivePdfThumb();
     if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) applyPageView();
     return;
@@ -3173,8 +3175,6 @@ function showPdfPage(page, options = {}) {
     els.viewerEmpty.hidden = true;
     els.pdfViewer.classList.remove("empty");
     els.viewerControls.hidden = false;
-    els.viewRotate.hidden = true;
-    els.viewPanMode.hidden = true;
     updateActivePdfThumb();
     updatePagePosition(null);
     showTxtContent(sourcePath);
@@ -3236,8 +3236,6 @@ function showPdfPage(page, options = {}) {
 
     els.pdfViewer.classList.remove("empty");
     els.viewerControls.hidden = false;
-    els.viewRotate.hidden = true;
-    els.viewPanMode.hidden = true;
     updateActivePdfThumb();
     updatePagePosition(null);
     return;
@@ -3255,8 +3253,6 @@ function showPdfPage(page, options = {}) {
   els.viewerEmpty.hidden = true;
   els.pdfViewer.classList.remove("empty");
   els.viewerControls.hidden = false;
-  els.viewRotate.hidden = false;
-  els.viewPanMode.hidden = false;
   updateActivePdfThumb();
   if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) applyPageView();
   requestHighQualityPage(page);
@@ -3265,8 +3261,8 @@ function showPdfPage(page, options = {}) {
 
 function clampPan() {
   // Ровные границы перетаскивания: лист можно увести за любой край,
-  // но пара сантиметров (70px) всегда остаётся в видимой зоне,
-  // чтобы его можно было вернуть обратно.
+  // но гарантируется доступность всех 4 краёв при увеличении,
+  // а при уменьшении лист не улетает за пределы видимости.
   const view = state.view;
   if (els.pdfPageImage.hidden) return;
   const naturalWidth = els.pdfPageImage.naturalWidth;
@@ -3277,9 +3273,11 @@ function clampPan() {
   const rotated = Math.abs(view.rotation % 180) === 90;
   const width = (rotated ? naturalHeight : naturalWidth) * view.scale;
   const height = (rotated ? naturalWidth : naturalHeight) * view.scale;
-  const margin = 70;
-  const maxX = Math.max(0, width / 2 + stage.width / 2 - margin);
-  const maxY = Math.max(0, height / 2 + stage.height / 2 - margin);
+  // Запас видимости края: как минимум 70px или половина размера листа
+  const marginX = Math.min(70, width / 2);
+  const marginY = Math.min(70, height / 2);
+  const maxX = Math.max(0, width / 2 + stage.width / 2 - marginX);
+  const maxY = Math.max(0, height / 2 + stage.height / 2 - marginY);
   view.panX = Math.min(maxX, Math.max(-maxX, view.panX));
   view.panY = Math.min(maxY, Math.max(-maxY, view.panY));
 }
@@ -3295,7 +3293,6 @@ function updateViewTransform() {
   ].join(" ");
   els.pdfStage.classList.toggle("pan-mode", view.panMode);
   els.pdfStage.classList.toggle("dragging", view.dragging);
-  els.viewPanMode.classList.toggle("active", view.panMode);
   if (state.excelWorkbook) {
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-hand", value: view.panMode }, "*");
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: view.rotation }, "*");
@@ -3325,10 +3322,11 @@ function fitPdfPage() {
   state.view.scale = state.view.fitScale;
   state.view.panX = 0;
   state.view.panY = 0;
+  state.view.userZoomed = false;
   updateViewTransform();
 }
 
-function zoomPdf(factor) {
+function zoomPdf(factor, originX = null, originY = null) {
   const isStageViewing = state.viewMode === "full" || els.pdfViewer?.classList.contains("stage-active");
   if (!isStageViewing) {
     zoomThumbs(factor);
@@ -3345,7 +3343,23 @@ function zoomPdf(factor) {
     return;
   }
   if (els.pdfPageImage.hidden) return;
-  state.view.scale = Math.min(8, Math.max(0.05, state.view.scale * factor));
+  const oldScale = state.view.scale;
+  const newScale = Math.min(8, Math.max(0.05, oldScale * factor));
+  if (newScale === oldScale) return;
+
+  // Если переданы координаты курсора относительно экрана, масштабируем относительно этой точки
+  if (originX !== null && originY !== null && els.pdfStage) {
+    const stageRect = els.pdfStage.getBoundingClientRect();
+    if (stageRect.width > 0 && stageRect.height > 0) {
+      const cx = originX - (stageRect.left + stageRect.width / 2);
+      const cy = originY - (stageRect.top + stageRect.height / 2);
+      const ratio = newScale / oldScale;
+      state.view.panX = cx - (cx - state.view.panX) * ratio;
+      state.view.panY = cy - (cy - state.view.panY) * ratio;
+    }
+  }
+
+  state.view.scale = newScale;
   state.view.userZoomed = true;
   updateViewTransform();
 }
@@ -3377,8 +3391,6 @@ function zoomTree(factor) {
 
 function applyPageView() {
   if (state.view.userZoomed) {
-    state.view.panX = 0;
-    state.view.panY = 0;
     updateViewTransform();
     return;
   }
@@ -3391,8 +3403,6 @@ function setStageActive(active) {
   if (els.pdfStage) els.pdfStage.classList.toggle("active-stage", isAct);
   const showControls = state.viewMode === "full" || isAct;
   if (els.viewerControls) els.viewerControls.hidden = !showControls;
-  if (els.viewRotate) els.viewRotate.hidden = !showControls || Boolean(state.excelWorkbook);
-  if (els.viewPanMode) els.viewPanMode.hidden = !showControls;
   if (isAct) {
     requestAnimationFrame(() => requestAnimationFrame(fitPdfPage));
   }
@@ -3403,11 +3413,7 @@ function setViewerMode(mode) {
   state.viewMode = mode;
   state.view.userZoomed = false;
   els.shell.classList.toggle("full-view", mode === "full");
-  els.viewStandardMode.classList.toggle("active", mode === "standard");
-  els.viewFullMode.classList.toggle("active", mode === "full");
   const showControls = mode === "full" || els.pdfViewer?.classList.contains("stage-active");
-  if (els.viewRotate) els.viewRotate.hidden = !showControls || Boolean(state.excelWorkbook);
-  if (els.viewPanMode) els.viewPanMode.hidden = !showControls;
   if (els.viewerControls) els.viewerControls.hidden = !showControls;
   if (mode === "full") {
     setStageActive(true);
@@ -4264,28 +4270,9 @@ els.viewFit.addEventListener("click", () => {
   state.view.userZoomed = false;
   fitPdfPage();
 });
-els.viewRotate.addEventListener("click", () => {
-  // Во 2-м режиме поворот полностью заблокирован: поворот работает только для большого окна в 1-м и 3-м режимах
-  if (state.viewMode === "medium") return;
 
-  if (state.excelWorkbook) {
-    state.view.rotation = (state.view.rotation + 90) % 360;
-    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: state.view.rotation }, "*");
-    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
-    return;
-  }
 
-  // В 1-м и 3-м режимах вращается ТОЛЬКО главное окно большого просмотра (миниатюры не вращаются вообще)
-  state.view.rotation = (state.view.rotation + 90) % 360;
-  fitPdfPage();
-});
-els.viewPanMode.addEventListener("click", () => {
-  state.view.panMode = !state.view.panMode;
-  updateViewTransform();
-});
-if (els.viewStandardMode) els.viewStandardMode.addEventListener("click", () => setViewerMode("standard"));
-if (els.viewMediumMode) els.viewMediumMode.addEventListener("click", () => setViewerMode("medium"));
-if (els.viewFullMode) els.viewFullMode.addEventListener("click", () => setViewerMode("full"));
+
 
 // Блокируем масштабирование всего окна браузера (Ctrl + / Ctrl - / Ctrl + wheel в пустых местах),
 // чтобы каркас окон, рамки и разметка никогда не «плыли»
@@ -4303,12 +4290,14 @@ window.addEventListener("keydown", (event) => {
 
 els.pdfPageImage.addEventListener("dblclick", (e) => {
   e.stopPropagation();
+  if (pdfDragMoved) return;
   setViewerMode(state.viewMode === "full" ? "standard" : "full");
 });
 
 if (els.pdfStage) {
   els.pdfStage.addEventListener("dblclick", (e) => {
     if (e.target.closest(".viewer-controls, .excel-tabs-bar, button, a, input")) return;
+    if (pdfDragMoved) return;
     setViewerMode(state.viewMode === "full" ? "standard" : "full");
   });
   els.pdfStage.addEventListener("contextmenu", (e) => {
@@ -4397,7 +4386,7 @@ els.pdfStage.addEventListener("wheel", (event) => {
   if (!event.ctrlKey || (els.pdfPageImage.hidden && !state.excelWorkbook)) return;
   event.preventDefault();
   event.stopPropagation();
-  zoomPdf(event.deltaY < 0 ? 1.12 : 0.89);
+  zoomPdf(event.deltaY < 0 ? 1.12 : 0.89, event.clientX, event.clientY);
 }, { passive: false });
 
 // Масштабирование только миниатюр (Ctrl + колёсико над правой лентой)
@@ -4480,11 +4469,14 @@ try {
   updateScaleIndicator();
 } catch {}
 
+let pdfDragMoved = false;
+
 els.pdfStage.addEventListener("pointerdown", (event) => {
   if (event.target.closest(".viewer-controls")) return;
-  if (!state.view.panMode || els.pdfPageImage.hidden || event.button !== 0) return;
+  if (els.pdfPageImage.hidden || event.button !== 0) return;
   event.preventDefault();
   state.view.dragging = true;
+  pdfDragMoved = false;
   state.view.dragStartX = event.clientX;
   state.view.dragStartY = event.clientY;
   state.view.dragPanX = state.view.panX;
@@ -4495,8 +4487,13 @@ els.pdfStage.addEventListener("pointerdown", (event) => {
 
 els.pdfStage.addEventListener("pointermove", (event) => {
   if (!state.view.dragging) return;
-  state.view.panX = state.view.dragPanX + (event.clientX - state.view.dragStartX);
-  state.view.panY = state.view.dragPanY + (event.clientY - state.view.dragStartY);
+  const dx = event.clientX - state.view.dragStartX;
+  const dy = event.clientY - state.view.dragStartY;
+  if (!pdfDragMoved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+    pdfDragMoved = true;
+  }
+  state.view.panX = state.view.dragPanX + dx;
+  state.view.panY = state.view.dragPanY + dy;
   updateViewTransform();
 });
 
