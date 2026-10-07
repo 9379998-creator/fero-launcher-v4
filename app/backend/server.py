@@ -66,6 +66,7 @@ WORD_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_word_to_pdf.ps1"
 EXCEL_XLS_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_xls_to_xlsx.ps1"
 DWG_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_model_space.ps1"
 DWG_SMART_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_smart.ps1"
+DWG_FAST_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_fast.ps1"
 VERSION = "0.4.0-v3-pdf-render"
 APP_VERSION = "3.1.0"
 APP_BRANCH = "dvg-main"
@@ -108,7 +109,7 @@ PDF_PAGE_TIMEOUT_SECONDS = 25
 PDF_DOCUMENT_TIMEOUT_SECONDS = 600
 WORD_CONVERT_TIMEOUT_SECONDS = 120
 EXCEL_CONVERT_TIMEOUT_SECONDS = 180
-DWG_RENDER_TIMEOUT_SECONDS = 600
+DWG_RENDER_TIMEOUT_SECONDS = 3600
 DWG_MODEL_PAGE_TIMEOUT_SECONDS = 120
 DWG_DAEMON_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_daemon.ps1"
 DWG_DAEMON_DIR = DWG_CACHE_DIR / "daemon"
@@ -972,6 +973,11 @@ def dwg_convert_process(
         )
 
 
+_DWG_CONVERT_LOCK = threading.Lock()
+_DWG_BG_LOCK = threading.Lock()
+_DWG_BG_ACTIVE: set[str] = set()
+
+
 def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
     """Экспорт чертежа DWG в многостраничный векторный PDF через AutoCAD COM.
 
@@ -1011,60 +1017,86 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
         except (OSError, json.JSONDecodeError):
             pass
 
-    script_to_run = DWG_SMART_RENDER_SCRIPT if DWG_SMART_RENDER_SCRIPT.exists() else DWG_RENDER_SCRIPT
+    script_to_run = (
+        DWG_FAST_RENDER_SCRIPT
+        if DWG_FAST_RENDER_SCRIPT.exists()
+        else (DWG_SMART_RENDER_SCRIPT if DWG_SMART_RENDER_SCRIPT.exists() else DWG_RENDER_SCRIPT)
+    )
     final_pdf = None
-    try:
-        process = dwg_convert_process(
-            path=path,
-            paired_pdf=paired_pdf,
-            fallback_pdf=fallback_pdf,
-            script_to_run=script_to_run,
-        )
-        if process.returncode != 0:
-            message = process.stderr.strip() or process.stdout.strip() or "CAD-система (AutoCAD) не смогла создать PDF для чертежа"
-            raise RuntimeError(message)
-
-        if paired_pdf.exists() and paired_pdf.stat().st_size > 1024:
-            final_pdf = paired_pdf
-        elif fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024:
-            final_pdf = fallback_pdf
-        else:
-            for line in reversed((process.stdout or "").splitlines()):
-                line = line.strip()
-                if line.startswith("{") and line.endswith("}"):
-                    try:
-                        data = json.loads(line)
-                        cand = Path(data.get("finalPath", ""))
-                        if cand.exists() and cand.stat().st_size > 1024:
-                            final_pdf = cand
-                            break
-                    except Exception:
-                        pass
-
-        if not final_pdf or not final_pdf.exists() or final_pdf.stat().st_size <= 1024:
-            raise RuntimeError("CAD-система (AutoCAD) не создала PDF-файл для чертежа")
-    except Exception as cad_err:
-        try:
+    with _DWG_CONVERT_LOCK:
+        # Повторная проверка кэша под блокировкой (на случай одновременных запросов)
+        if paired_pdf.exists() and paired_pdf.is_file() and paired_pdf.stat().st_size > 1024:
             try:
-                from app.backend.dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
-            except ImportError:
-                from dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
-            thumb = extract_raw_thumbnail_from_dwg(path)
-            img_bytes = thumb[0] if thumb else _generate_placeholder_png(path.name, "Model")
+                if paired_pdf.stat().st_mtime_ns >= path.stat().st_mtime_ns:
+                    return paired_pdf, True
+            except OSError:
+                pass
+        if fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024 and manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if (
+                    manifest.get("sourcePath") == str(path)
+                    and manifest.get("cacheKey") == key
+                    and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
+                    and manifest.get("sourceSize") == path.stat().st_size
+                ):
+                    return fallback_pdf, True
+            except (OSError, json.JSONDecodeError):
+                pass
 
-            # Конвертируем PNG превью чертежа в PDF через fitz (PyMuPDF)
-            import fitz
-            img_doc = fitz.open(stream=img_bytes, filetype="png")
-            pdf_bytes = img_doc.convert_to_pdf()
-            img_doc.close()
+        try:
+            process = dwg_convert_process(
+                path=path,
+                paired_pdf=paired_pdf,
+                fallback_pdf=fallback_pdf,
+                script_to_run=script_to_run,
+            )
+            if process.returncode != 0:
+                message = process.stderr.strip() or process.stdout.strip() or "CAD-система (AutoCAD) не смогла создать PDF для чертежа"
+                raise RuntimeError(message)
 
-            fallback_pdf.write_bytes(pdf_bytes)
-            final_pdf = fallback_pdf
-        except Exception as fallback_err:
-            raise RuntimeError(f"Сбой рендера DWG: {cad_err} (фолбэк: {fallback_err})")
+            if paired_pdf.exists() and paired_pdf.stat().st_size > 1024:
+                final_pdf = paired_pdf
+            elif fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024:
+                final_pdf = fallback_pdf
+            else:
+                for line in reversed((process.stdout or "").splitlines()):
+                    line = line.strip()
+                    if line.startswith("{") and line.endswith("}"):
+                        try:
+                            data = json.loads(line)
+                            cand = Path(data.get("finalPath", ""))
+                            if cand.exists() and cand.stat().st_size > 1024:
+                                final_pdf = cand
+                                break
+                        except Exception:
+                            pass
+
+            if not final_pdf or not final_pdf.exists() or final_pdf.stat().st_size <= 1024:
+                raise RuntimeError("CAD-система (AutoCAD) не создала PDF-файл для чертежа")
+        except Exception as cad_err:
+            try:
+                try:
+                    from app.backend.dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
+                except ImportError:
+                    from dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
+                thumb = extract_raw_thumbnail_from_dwg(path)
+                img_bytes = thumb[0] if thumb else _generate_placeholder_png(path.name, "Model")
+
+                # Конвертируем PNG превью чертежа в PDF через fitz (PyMuPDF)
+                import fitz
+                img_doc = fitz.open(stream=img_bytes, filetype="png")
+                pdf_bytes = img_doc.convert_to_pdf()
+                img_doc.close()
+
+                fallback_pdf.write_bytes(pdf_bytes)
+                final_pdf = fallback_pdf
+            except Exception as fallback_err:
+                raise RuntimeError(f"Сбой рендера DWG: {cad_err} (фолбэк: {fallback_err})")
 
     if final_pdf == fallback_pdf:
-        manifest_path.write_text(
+        tmp_manifest = manifest_path.with_suffix(".tmp")
+        tmp_manifest.write_text(
             json.dumps(
                 {
                     "sourcePath": str(path),
@@ -1081,11 +1113,13 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
             ),
             encoding="utf-8",
         )
+        try:
+            tmp_manifest.replace(manifest_path)
+        except OSError:
+            manifest_path.write_text(tmp_manifest.read_text(encoding="utf-8"), encoding="utf-8")
+            tmp_manifest.unlink(missing_ok=True)
     return final_pdf, False
 
-
-_DWG_BG_LOCK = threading.Lock()
-_DWG_BG_ACTIVE: set[str] = set()
 
 
 def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
@@ -2585,7 +2619,14 @@ def excel_workbook_preview(path: Path) -> dict:
 def pdf_document_preview(path: Path) -> dict:
     """Возвращает метаданные PDF и URL быстрой миниатюры 1-й страницы для ленты (по аналогии с Excel и Word)."""
     if not path.exists() or not path.is_file():
-        raise FileNotFoundError(f"PDF-файл не найден: {path}")
+        raise FileNotFoundError(f"Файл не найден: {path}")
+
+    original_path = path
+    is_dwg = path.suffix.casefold() == ".dwg"
+    if is_dwg:
+        pdf_path, _ = dwg_to_model_pdf(path)
+        path = pdf_path
+
     if path.suffix.casefold() != ".pdf":
         raise ValueError(f"Это не PDF-файл: {path}")
 
@@ -2601,6 +2642,10 @@ def pdf_document_preview(path: Path) -> dict:
             if cached_meta.get("path") == str(path) and cached_meta.get("pages"):
                 cached_meta["thumbnailUrl"] = f"/cache/pdf/{key}/thumb.png"
                 cached_meta["rawUrl"] = f"/api/file/raw?path={quote(str(path))}"
+                if is_dwg:
+                    cached_meta["name"] = original_path.name
+                    cached_meta["nativePath"] = str(original_path)
+                    cached_meta["sourceType"] = "DWG"
                 return cached_meta
         except Exception:
             pass
@@ -2630,15 +2675,22 @@ def pdf_document_preview(path: Path) -> dict:
     finally:
         _FITZ_RENDER_LOCK.release()
 
+    paired_html = path.with_suffix(".html")
+    has_html = paired_html.exists() and paired_html.is_file() and paired_html.stat().st_size > 0
+
     meta = {
-        "name": path.name,
+        "name": original_path.name if is_dwg else path.name,
         "path": str(path),
+        "nativePath": str(original_path) if is_dwg else str(path),
+        "sourceType": "DWG" if is_dwg else "PDF",
         "pages": page_count,
         "pagesInfo": pages_info,
-        "bytes": path.stat().st_size,
+        "bytes": original_path.stat().st_size if is_dwg else path.stat().st_size,
         "cacheKey": key,
         "thumbnailUrl": f"/cache/pdf/{key}/thumb.png",
         "rawUrl": f"/api/file/raw?path={quote(str(path))}",
+        "htmlPath": str(paired_html) if has_html else None,
+        "htmlUrl": f"/api/file/raw?path={quote(str(paired_html))}" if has_html else None,
     }
     try:
         manifest_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

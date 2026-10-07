@@ -1,4 +1,4 @@
-# Invoke-NativeDwgPdfExport.ps1 - shared native AutoCAD PDF export helper via accoreconsole.exe
+﻿# Invoke-NativeDwgPdfExport.ps1 - shared native AutoCAD PDF export helper via accoreconsole.exe
 # ASCII-only encoding for PowerShell 5.1 compatibility.
 
 $script:NativeExportAccorePath = ""

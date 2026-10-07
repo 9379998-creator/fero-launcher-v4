@@ -1,4 +1,4 @@
-param(
+﻿param(
   [Parameter(Mandatory = $true)][string]$InputPath,
   [Parameter(Mandatory = $false)][string]$OutputPath = "",
   [Parameter(Mandatory = $false)][string]$FallbackCachePath = "",
@@ -167,6 +167,14 @@ try {
   if ($nonEmptyLayouts.Count -gt 0) {
     #                       
     foreach ($layout in $nonEmptyLayouts) {
+      $pageFile = Join-Path $tempDir ("page_{0:D4}.pdf" -f $layout.TabOrder)
+      # RESUME: готовая страница из прошлого запуска — пропускаем печать, берём из кэша.
+      if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
+        Write-Output ("PAGE_EXISTS: {0} skipping render, using cached page" -f $layout.TabOrder)
+        $pagePdfPaths.Add($pageFile)
+        continue
+      }
+
       $document.ActiveLayout = $layout
 
       # BENCH-WINNER: trust stored page setup; touch the plotter only if the
@@ -230,18 +238,15 @@ try {
       $layout.PlotWithLineweights = $true
       $layout.PlotWithPlotStyles = $true
 
-      $pageFile = Join-Path $tempDir ("page_{0:D4}.pdf" -f $layout.TabOrder)
-      # RESUME: готовая страница из прошлого запуска — пропускаем печать, берём из кэша.
-      if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
-        Write-Output ("PAGE_EXISTS: {0} skipping render, using cached page" -f $layout.TabOrder)
-        $pagePdfPaths.Add($pageFile)
-        continue
-      }
-      if ($document.Plot.PlotToFile($pageFile)) {
-        if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
-          $pagePdfPaths.Add($pageFile)
-          Write-Output ("PROGRESS layout={0} done={1}/{2} file={3}" -f $layout.TabOrder, $pagePdfPaths.Count, $nonEmptyLayouts.Count, [System.IO.Path]::GetFileName($pageFile))
+      try {
+        if ($document.Plot.PlotToFile($pageFile)) {
+          if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
+            $pagePdfPaths.Add($pageFile)
+            Write-Output ("PROGRESS layout={0} done={1}/{2} file={3}" -f $layout.TabOrder, $pagePdfPaths.Count, $nonEmptyLayouts.Count, [System.IO.Path]::GetFileName($pageFile))
+          }
         }
+      } catch {
+        Write-Output ("DEBUG: PlotToFile failed for layout {0}: {1}" -f $layout.TabOrder, $_)
       }
     }
   }
@@ -415,7 +420,9 @@ except ImportError:
     } catch {}
   }
 
-  if (Test-Path -LiteralPath $tempDir) {
+  # Очищаем tempDir только при успешном завершении, чтобы при прерывании
+  # уже отпечатанные страницы не удалялись, а использовались для RESUME
+  if ($result -and $result.ok -and (Test-Path -LiteralPath $tempDir)) {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
   }
 }

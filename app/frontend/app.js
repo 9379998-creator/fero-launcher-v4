@@ -109,9 +109,13 @@ const els = {
   wordOpenNative: document.getElementById("wordOpenNative"),
   pdfViewerDoc: document.getElementById("pdfViewerDoc"),
   pdfDocTitle: document.getElementById("pdfDocTitle"),
+  pdfTabs: document.getElementById("pdfTabs"),
+  pdfTabsLeft: document.getElementById("pdfTabsLeft"),
+  pdfTabsRight: document.getElementById("pdfTabsRight"),
   pdfMeta: document.getElementById("pdfMeta"),
   pdfDocFrame: document.getElementById("pdfDocFrame"),
   pdfOpenNative: document.getElementById("pdfOpenNative"),
+  pdfOpenHtml: document.getElementById("pdfOpenHtml"),
   viewerEmpty: document.getElementById("viewerEmpty"),
   viewerControls: document.getElementById("viewerControls"),
   qualityBadge: document.getElementById("qualityBadge"),
@@ -1349,6 +1353,22 @@ async function previewFileDirectly(node, options = {}) {
       },
     };
     await renderPdfDocuments([pdfItem], { singleFile: true, fullView: options.fullView });
+    if (options.fullView) setViewerMode("full");
+    return;
+  }
+
+  // 1c. DWG (.dwg): быстрый векторный просмотр через парный PDF / accoreconsole и PDF.js
+  if (ext === "DWG") {
+    const dwgItem = {
+      ...node,
+      previewType: "PDF",
+      previewFor: {
+        type: "DWG",
+        name: node.name,
+        path: node.path,
+      },
+    };
+    await renderPdfDocuments([dwgItem], { singleFile: true, fullView: options.fullView });
     if (options.fullView) setViewerMode("full");
     return;
   }
@@ -2943,13 +2963,53 @@ async function activatePdfDocument(index) {
   els.viewerControls.hidden = false;
   els.viewRotate.hidden = false;
   els.viewPanMode.hidden = false;
-  setActiveNativePath(docItem.path);
-  els.pdfOpenNative.onclick = () => openFileByPath(docItem.path, "native");
-  revealPathInTree(docItem.path);
+
+  // Отрисовка вкладок листов для DWG/многостраничных PDF (Архитектура «Вариант А»)
+  if (els.pdfTabs) {
+    els.pdfTabs.replaceChildren();
+    const pageCount = Number(docItem.pages) || 0;
+    if (pageCount > 1) {
+      if (els.pdfTabsLeft) els.pdfTabsLeft.hidden = false;
+      els.pdfTabs.hidden = false;
+      if (els.pdfTabsRight) els.pdfTabsRight.hidden = false;
+
+      for (let i = 1; i <= pageCount; i++) {
+        const tabBtn = document.createElement("button");
+        tabBtn.className = "excel-tab" + (i === 1 ? " active" : "");
+        tabBtn.type = "button";
+        tabBtn.dataset.page = String(i);
+        tabBtn.textContent = `Лист ${i}`;
+        tabBtn.title = `Перейти к листу ${i}`;
+        tabBtn.addEventListener("click", () => {
+          [...els.pdfTabs.querySelectorAll(".excel-tab")].forEach((t) => t.classList.remove("active"));
+          tabBtn.classList.add("active");
+          els.pdfDocFrame.contentWindow?.postMessage({ type: "launcher-pdf-goto-page", page: i }, "*");
+        });
+        els.pdfTabs.append(tabBtn);
+      }
+    } else {
+      if (els.pdfTabsLeft) els.pdfTabsLeft.hidden = true;
+      els.pdfTabs.hidden = true;
+      if (els.pdfTabsRight) els.pdfTabsRight.hidden = true;
+    }
+  }
+
+  const nativeTarget = docItem.nativePath || docItem.path;
+  setActiveNativePath(nativeTarget);
+  els.pdfOpenNative.onclick = () => openFileByPath(nativeTarget, "native");
+  if (els.pdfOpenHtml) {
+    if (docItem.htmlPath) {
+      els.pdfOpenHtml.hidden = false;
+      els.pdfOpenHtml.onclick = () => openFileByPath(docItem.htmlPath, "system");
+    } else {
+      els.pdfOpenHtml.hidden = true;
+    }
+  }
+  revealPathInTree(nativeTarget);
   updateViewTransform();
 
   const fileParam = encodeURIComponent(docItem.rawUrl || `/api/file/raw?path=${encodeURIComponent(docItem.path)}`);
-  els.pdfDocFrame.src = `assets/pdf_viewer.html?v=20261006-pdf-fit-v2&file=${fileParam}`;
+  els.pdfDocFrame.src = `assets/pdf_viewer.html?v=20261007-pdf-smooth-v1&file=${fileParam}`;
   forwardPdfDocContextMenu();
 }
 
@@ -3571,10 +3631,10 @@ function fitPdfPage() {
   updateViewTransform();
 }
 
-function zoomPdf(factor) {
+function zoomPdf(factor, clientX, clientY) {
   const isStageViewing = state.viewMode === "full" || els.pdfViewer?.classList.contains("stage-active");
   if (!isStageViewing) {
-    zoomThumbs(factor);
+    zoomThumbs(factor, clientX, clientY);
     return;
   }
   if (state.excelWorkbook) {
@@ -3594,7 +3654,23 @@ function zoomPdf(factor) {
     return;
   }
   if (els.pdfPageImage.hidden) return;
-  state.view.scale = Math.min(8, Math.max(0.05, state.view.scale * factor));
+
+  const stage = els.pdfStage.getBoundingClientRect();
+  const mouseX = (typeof clientX === "number" ? clientX : (stage.left + stage.width / 2)) - stage.left;
+  const mouseY = (typeof clientY === "number" ? clientY : (stage.top + stage.height / 2)) - stage.top;
+  const stageCenterX = stage.width / 2;
+  const stageCenterY = stage.height / 2;
+  const offsetX = mouseX - stageCenterX;
+  const offsetY = mouseY - stageCenterY;
+
+  const prevScale = state.view.scale || 1;
+  const nextScale = Math.min(8, Math.max(0.05, prevScale * factor));
+  if (nextScale === prevScale) return;
+  const ratio = nextScale / prevScale;
+
+  state.view.panX = offsetX - (offsetX - state.view.panX) * ratio;
+  state.view.panY = offsetY - (offsetY - state.view.panY) * ratio;
+  state.view.scale = nextScale;
   state.view.userZoomed = true;
   updateViewTransform();
 }
@@ -3606,18 +3682,43 @@ function updateScaleIndicator() {
   }
 }
 
-function zoomThumbs(factor) {
-  state.thumbScale = Math.min(10, Math.max(0.4, Number((state.thumbScale * factor).toFixed(2))));
+function zoomThumbs(factor, clientX, clientY) {
+  const rect = els.pdfThumbs.getBoundingClientRect();
+  const mouseX = (typeof clientX === "number" ? clientX : (rect.left + rect.width / 2)) - rect.left;
+  const mouseY = (typeof clientY === "number" ? clientY : (rect.top + rect.height / 2)) - rect.top;
+  const prevScale = state.thumbScale || 1;
+  const nextScale = Math.min(10, Math.max(0.4, Number((prevScale * factor).toFixed(2))));
+  if (nextScale === prevScale) return;
+  const ratio = nextScale / prevScale;
+  const scrollX = els.pdfThumbs.scrollLeft;
+  const scrollY = els.pdfThumbs.scrollTop;
+
+  state.thumbScale = nextScale;
   els.pdfThumbs.style.setProperty("--thumb-scale", String(state.thumbScale));
+  els.pdfThumbs.scrollLeft = (scrollX + mouseX) * ratio - mouseX;
+  els.pdfThumbs.scrollTop = (scrollY + mouseY) * ratio - mouseY;
   try {
     localStorage.setItem("launcher_thumb_scale", String(state.thumbScale));
   } catch {}
   updateScaleIndicator();
 }
 
-function zoomTree(factor) {
-  state.treeScale = Math.min(2.5, Math.max(0.75, Number(((state.treeScale || 1) * factor).toFixed(2))));
+function zoomTree(factor, clientX, clientY) {
+  const scrollContainer = els.objectTree?.scrollHeight > 0 ? els.objectTree : (els.objectList?.scrollHeight > 0 ? els.objectList : els.sidebar);
+  const rect = scrollContainer.getBoundingClientRect();
+  const mouseX = (typeof clientX === "number" ? clientX : (rect.left + rect.width / 2)) - rect.left;
+  const mouseY = (typeof clientY === "number" ? clientY : (rect.top + rect.height / 2)) - rect.top;
+  const prevScale = state.treeScale || 1;
+  const nextScale = Math.min(2.5, Math.max(0.75, Number((prevScale * factor).toFixed(2))));
+  if (nextScale === prevScale) return;
+  const ratio = nextScale / prevScale;
+  const scrollX = scrollContainer.scrollLeft;
+  const scrollY = scrollContainer.scrollTop;
+
+  state.treeScale = nextScale;
   document.documentElement.style.setProperty("--tree-scale", String(state.treeScale));
+  scrollContainer.scrollLeft = (scrollX + mouseX) * ratio - mouseX;
+  scrollContainer.scrollTop = (scrollY + mouseY) * ratio - mouseY;
   try {
     localStorage.setItem("launcher_tree_scale", String(state.treeScale));
   } catch {}
@@ -3919,9 +4020,8 @@ async function renderPdfDocuments(pdfFiles, options = {}) {
       return;
     }
     const pdfFile = pdfFiles[index];
-    els.progressDetail.textContent = `Документ ${index + 1} из ${pdfFiles.length}: ${pdfFile.name} — подготовка…`;
-    const controller = createOperationController();
-    const timeoutSec = 60;
+    const isDwgFile = (pdfFile.extension || "").toUpperCase() === "DWG" || (pdfFile.name || "").toLowerCase().endsWith(".dwg") || pdfFile.previewType === "DWG_MODEL";
+    const timeoutSec = isDwgFile ? 300 : 90;
     const timeoutId = setTimeout(() => controller.abort(), timeoutSec * 1000);
     try {
       const response = await fetch("/api/pdf/document", {
@@ -3984,7 +4084,7 @@ async function renderSelectedFiles() {
   }
   const pdfItems = previewItems.filter((item) => {
     const ext = (item.extension || "").toUpperCase();
-    return ext === "PDF" || item.previewType === "PDF";
+    return ext === "PDF" || ext === "DWG" || item.previewType === "PDF" || item.previewType === "DWG_MODEL";
   });
   if (pdfItems.length === previewItems.length && pdfItems.length > 0) {
     await renderPdfDocuments(pdfItems);
@@ -4572,6 +4672,24 @@ els.excelTabs.addEventListener("wheel", (event) => {
   event.preventDefault();
   els.excelTabs.scrollLeft += event.deltaY;
 }, { passive: false });
+
+if (els.pdfTabsLeft) {
+  els.pdfTabsLeft.addEventListener("click", () => {
+    els.pdfTabs?.scrollBy({ left: -Math.max(180, els.pdfTabs.clientWidth * .72), behavior: "smooth" });
+  });
+}
+if (els.pdfTabsRight) {
+  els.pdfTabsRight.addEventListener("click", () => {
+    els.pdfTabs?.scrollBy({ left: Math.max(180, els.pdfTabs.clientWidth * .72), behavior: "smooth" });
+  });
+}
+if (els.pdfTabs) {
+  els.pdfTabs.addEventListener("wheel", (event) => {
+    if (!event.shiftKey || !event.deltaY) return;
+    event.preventDefault();
+    els.pdfTabs.scrollLeft += event.deltaY;
+  }, { passive: false });
+}
 els.viewZoomOut.addEventListener("click", () => zoomPdf(0.82));
 els.viewZoomIn.addEventListener("click", () => zoomPdf(1.22));
 // «Вписать» возвращает всё в нормальное состояние: масштаб картинки,
@@ -4747,7 +4865,7 @@ if (els.sidebar) {
     if (!event.ctrlKey || !event.deltaY) return;
     event.preventDefault();
     event.stopPropagation();
-    zoomTree(event.deltaY < 0 ? 1.08 : 0.92);
+    zoomTree(event.deltaY < 0 ? 1.05 : 0.95, event.clientX, event.clientY);
   }, { passive: false });
 }
 if (els.scaleWidget) {
@@ -4755,9 +4873,13 @@ if (els.scaleWidget) {
     if (!event.deltaY) return;
     event.preventDefault();
     event.stopPropagation();
-    const factor = event.deltaY < 0 ? 1.08 : 0.92;
-    zoomTree(factor);
-    zoomThumbs(factor);
+    const factor = event.deltaY < 0 ? 1.05 : 0.95;
+    const isStageViewing = state.viewMode === "full" || els.pdfViewer?.classList.contains("stage-active");
+    if (isStageViewing && (!els.pdfPageImage.hidden || state.excelWorkbook || state.wordDoc || state.pdfDoc)) {
+      zoomPdf(factor);
+    } else {
+      zoomThumbs(factor);
+    }
   }, { passive: false });
 }
 
@@ -4767,7 +4889,7 @@ els.pdfStage.addEventListener("wheel", (event) => {
   if (!event.ctrlKey || (els.pdfPageImage.hidden && !state.excelWorkbook && !state.wordDoc && !state.pdfDoc)) return;
   event.preventDefault();
   event.stopPropagation();
-  zoomPdf(event.deltaY < 0 ? 1.12 : 0.89);
+  zoomPdf(event.deltaY < 0 ? 1.05 : 0.95, event.clientX, event.clientY);
 }, { passive: false });
 
 // Масштабирование только миниатюр (Ctrl + колёсико над правой лентой)
@@ -4775,7 +4897,7 @@ els.pdfThumbs.addEventListener("wheel", (event) => {
   if (!event.ctrlKey || !event.deltaY) return;
   event.preventDefault();
   event.stopPropagation();
-  zoomThumbs(event.deltaY < 0 ? 1.15 : 0.87);
+  zoomThumbs(event.deltaY < 0 ? 1.05 : 0.95, event.clientX, event.clientY);
 }, { passive: false });
 
 // Панорамирование во 2-м окне (лента миниатюр) левой кнопкой мыши ("рука / лапа")
@@ -5515,6 +5637,20 @@ function showFileContextMenu(clientX, clientY, target) {
       label: "Открыть в программе по умолчанию",
       run: () => openFileByPath(target.path, "native"),
     });
+    const extUpper = (target.ext || extOfPath(target.path) || "").toUpperCase().replace(".", "");
+    if (extUpper === "DWG" || extUpper === "PDF") {
+      const htmlPath = target.path.replace(/\.[^./\\]+$/, ".html");
+      items.push({
+        label: "Открыть интерактивный HTML в браузере",
+        run: async () => {
+          try {
+            await openFileByPath(htmlPath, "system");
+          } catch (_) {
+            showToast("HTML-файл ещё не создан (сгенерируйте просмотр чертежа)");
+          }
+        },
+      });
+    }
     items.push({ sep: true });
   }
   items.push({

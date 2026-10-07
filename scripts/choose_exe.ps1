@@ -1,4 +1,4 @@
-# Windows Open File Dialog for picking executable (.exe) in FLauncher.
+﻿# Windows Open File Dialog for picking executable (.exe) in FLauncher.
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName System.Windows.Forms

@@ -154,7 +154,7 @@ function applyZoom(val) {{
 window.addEventListener('wheel', (e) => {{
   if (!e.ctrlKey) return;
   e.preventDefault();
-  applyZoom(scale * (e.deltaY < 0 ? 1.12 : 0.89));
+  applyZoom(scale * (e.deltaY < 0 ? 1.05 : 0.95));
 }}, {{ passive: false }});
 
 window.addEventListener('keydown', (e) => {{
