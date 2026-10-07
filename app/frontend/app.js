@@ -110,6 +110,7 @@ const els = {
   viewZoomOut: document.getElementById("viewZoomOut"),
   viewZoomIn: document.getElementById("viewZoomIn"),
   viewFit: document.getElementById("viewFit"),
+  viewRotate: document.getElementById("viewRotate"),
   viewOpenNative: document.getElementById("viewOpenNative"),
   contextMenu: document.getElementById("contextMenu"),
   scaleWidget: document.getElementById("scaleWidget"),
@@ -4270,6 +4271,19 @@ els.viewFit.addEventListener("click", () => {
   state.view.userZoomed = false;
   fitPdfPage();
 });
+
+if (els.viewRotate) {
+  els.viewRotate.addEventListener("click", () => {
+    if (state.excelWorkbook) {
+      state.view.rotation = (state.view.rotation + 90) % 360;
+      els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: state.view.rotation }, "*");
+      els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
+      return;
+    }
+    state.view.rotation = (state.view.rotation + 90) % 360;
+    fitPdfPage();
+  });
+}
 
 
 
