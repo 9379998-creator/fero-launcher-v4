@@ -4633,68 +4633,79 @@ window.addEventListener("keydown", (event) => {
   if (isInput) return;
 
   // Навигация клавишами Вверх / Вниз:
-  // Если мышь/фокус в правой ленте миниатюр (Зона 2) и есть страницы:
-  // ArrowUp / ArrowDown переключают миниатюры в ленте!
   if (event.key === "ArrowUp" || event.key === "ArrowDown") {
     const isThumbsActive = state.viewMode === "full" || state.activeNavZone === "thumbs" || els.pdfViewer?.contains(document.activeElement);
-    if (state.renderedPages?.length && isThumbsActive) {
+    const thumbEls = Array.from(els.pdfThumbs?.querySelectorAll(".pdf-thumb") || []);
+
+    if (thumbEls.length > 0 && isThumbsActive) {
       event.preventDefault();
-      stepThumbnails(event.key === "ArrowDown" ? 1 : -1);
+      // Находим текущую активную карточку в DOM ленты Окна 2
+      let activeIdx = thumbEls.findIndex((el) => el.classList.contains("active"));
+      if (activeIdx < 0) {
+        const currNorm = (state.revealedPath || Array.from(state.selectedPaths)[0] || "").replace(/\//g, "\\").toLowerCase();
+        if (currNorm) {
+          activeIdx = thumbEls.findIndex((el) => {
+            const p = (el.dataset.path || "").replace(/\//g, "\\").toLowerCase();
+            return p && p === currNorm;
+          });
+        }
+      }
+      if (activeIdx < 0) activeIdx = 0;
+
+      let nextIdx = event.key === "ArrowDown" ? activeIdx + 1 : activeIdx - 1;
+      if (nextIdx < 0) nextIdx = thumbEls.length - 1;
+      else if (nextIdx >= thumbEls.length) nextIdx = 0;
+
+      const nextThumb = thumbEls[nextIdx];
+      if (nextThumb) {
+        thumbEls.forEach((t, i) => t.classList.toggle("active", i === nextIdx));
+        nextThumb.focus();
+        nextThumb.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+
+        // Синхронизация с Окном 1 и показ соответствующего файла
+        if (nextThumb.dataset.pageKey) {
+          const page = state.renderedPages?.find((p) => {
+            try { return pageKey(p) === nextThumb.dataset.pageKey; } catch (_) { return false; }
+          });
+          if (page) {
+            showPdfPage(page, { skipTreeScroll: false });
+            const docPath = thumbPathForPage(page);
+            if (docPath) {
+              revealPathInTree(docPath, { updateSelection: true, skipScroll: false });
+            }
+          }
+        } else if (nextThumb.classList.contains("excel-book-thumb") && nextThumb.dataset.workbookIndex !== undefined) {
+          const wbIdx = Number(nextThumb.dataset.workbookIndex);
+          const isStage = Boolean(els.pdfViewer?.classList.contains("stage-active"));
+          if (isStage) {
+            activateExcelWorkbook(wbIdx).catch(showOperationError);
+          } else {
+            state.excelWorkbookIndex = wbIdx;
+            renderExcelWorkbookRail();
+          }
+          const nextBook = state.excelWorkbooks?.[wbIdx];
+          if (nextBook?.path) {
+            revealPathInTree(nextBook.path, { updateSelection: true, skipScroll: false });
+          }
+        } else if (nextThumb.classList.contains("word-doc-thumb") && nextThumb.dataset.docIndex !== undefined) {
+          const dIdx = Number(nextThumb.dataset.docIndex);
+          const isStage = Boolean(els.pdfViewer?.classList.contains("stage-active"));
+          if (isStage) {
+            activateWordDocument(dIdx).catch(showOperationError);
+          } else {
+            state.wordDocIndex = dIdx;
+            renderWordDocumentRail();
+          }
+          const nextDoc = state.wordDocs?.[dIdx];
+          if (nextDoc?.path) {
+            revealPathInTree(nextDoc.path, { updateSelection: true, skipScroll: false });
+          }
+        }
+      }
       return;
     }
-    if (state.excelWorkbooks?.length > 1 && isThumbsActive) {
-      event.preventDefault();
-      const books = state.excelWorkbooks;
-      let currentIdx = state.excelWorkbookIndex;
-      if (event.key === "ArrowDown") {
-        currentIdx = currentIdx >= 0 && currentIdx < books.length - 1 ? currentIdx + 1 : 0;
-      } else {
-        currentIdx = currentIdx > 0 ? currentIdx - 1 : books.length - 1;
-      }
-      const isStage = Boolean(els.pdfViewer?.classList.contains("stage-active"));
-      if (isStage) {
-        activateExcelWorkbook(currentIdx).catch(showOperationError);
-      } else {
-        state.excelWorkbookIndex = currentIdx;
-        renderExcelWorkbookRail();
-      }
-      const nextBook = books[currentIdx];
-      if (nextBook?.path) {
-        revealPathInTree(nextBook.path, { skipScroll: false });
-      }
-      const wbThumb = els.pdfThumbs?.querySelector(`.excel-book-thumb[data-workbook-index="${currentIdx}"]`);
-      if (wbThumb) {
-        wbThumb.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
-      }
-      return;
-    }
-    if (state.wordDocs?.length > 1 && isThumbsActive) {
-      event.preventDefault();
-      const docs = state.wordDocs;
-      let currentIdx = state.wordDocIndex ?? 0;
-      if (event.key === "ArrowDown") {
-        currentIdx = currentIdx >= 0 && currentIdx < docs.length - 1 ? currentIdx + 1 : 0;
-      } else {
-        currentIdx = currentIdx > 0 ? currentIdx - 1 : docs.length - 1;
-      }
-      const isStage = Boolean(els.pdfViewer?.classList.contains("stage-active"));
-      if (isStage) {
-        activateWordDocument(currentIdx).catch(showOperationError);
-      } else {
-        state.wordDocIndex = currentIdx;
-        renderWordDocumentRail();
-      }
-      const nextDoc = docs[currentIdx];
-      if (nextDoc?.path) {
-        revealPathInTree(nextDoc.path, { skipScroll: false });
-      }
-      const docThumb = els.pdfThumbs?.querySelector(`.word-doc-thumb[data-doc-index="${currentIdx}"]`);
-      if (docThumb) {
-        docThumb.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
-      }
-      return;
-    }
-    // Иначе (Зона 1 — дерево слева): навигация по списку файлов
+
+    // Иначе (Зона 1 — дерево слева): навигация по списку файлов БЕЗ авторендеринга
     if (inTreeMode()) {
       const files = state.visibleRows.filter((r) => r.type === "file");
       if (!files.length) return;
@@ -4713,6 +4724,19 @@ window.addEventListener("keydown", (event) => {
         if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
       }
       return;
+    }
+  }
+
+  // Клавиша Enter в дереве: явный запуск рендера для выбранного файла
+  if (event.key === "Enter" && inTreeMode() && state.activeNavZone !== "thumbs") {
+    const currentPath = Array.from(state.selectedPaths)[0] || state.revealedPath;
+    if (currentPath) {
+      const fileNode = state.visibleRows.find((r) => r.path === currentPath && r.type === "file");
+      if (fileNode) {
+        event.preventDefault();
+        previewFileDirectly(fileNode, { fullView: false }).catch(showOperationError);
+        return;
+      }
     }
   }
 
@@ -4735,7 +4759,7 @@ window.addEventListener("keydown", (event) => {
     }
     const nextBook = books[currentIdx];
     if (nextBook?.path) {
-      revealPathInTree(nextBook.path, { skipScroll: false });
+      revealPathInTree(nextBook.path, { updateSelection: true, skipScroll: false });
     }
     return;
   }
