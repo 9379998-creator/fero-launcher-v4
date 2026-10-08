@@ -158,12 +158,7 @@ def build_tree(folder: Path) -> tuple[dict, dict[str, int], int, int]:
         try:
             resolved_current = current.resolve()
             if resolved_current in visited_dirs:
-                return {
-                    "type": "folder",
-                    "name": current.name,
-                    "path": str(current),
-                    "children": [],
-                }
+                continue
             visited_dirs.add(resolved_current)
             entries = sorted(current.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold()))
         except OSError as error:

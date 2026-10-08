@@ -85,6 +85,7 @@ const els = {
   backToTree: document.getElementById("backToTree"),
   treeSearch: document.getElementById("treeSearch"),
   formatStrip: document.getElementById("formatStrip"),
+  treeFilterSummary: document.getElementById("treeFilterSummary"),
   objectTree: document.getElementById("objectTree"),
   pdfThumbs: document.getElementById("pdfThumbs"),
   pdfViewer: document.getElementById("pdfViewer"),
@@ -1021,6 +1022,22 @@ function nodeMatches(node, visiting = new Set()) {
   return res;
 }
 
+const folderMatchedFilesCache = new Map();
+function countMatchedFilesCached(node) {
+  if (!node || node.type !== "folder") return 0;
+  if (folderMatchedFilesCache.has(node)) return folderMatchedFilesCache.get(node);
+  let count = 0;
+  for (const child of node.children || []) {
+    if (child.type === "file") {
+      if (nodeMatches(child)) count++;
+    } else if (child.type === "folder") {
+      count += countMatchedFilesCached(child);
+    }
+  }
+  folderMatchedFilesCache.set(node, count);
+  return count;
+}
+
 function countDiffDescendants(node, result = { added: 0, changed: 0, removed: 0 }) {
   if (!node) return result;
   const stack = [node];
@@ -1442,6 +1459,7 @@ function updateRailSelectionHighlight() {
 function rebuildVisibleRows() {
   state.visibleRows = [];
   if (!state.currentManifest?.tree) return;
+  const isFiltering = treeFilteringActive();
   const stack = [state.currentManifest.tree];
   const seen = new Set();
   while (stack.length) {
@@ -1450,7 +1468,8 @@ function rebuildVisibleRows() {
     seen.add(node);
     if (!nodeMatches(node)) continue;
     state.visibleRows.push(node);
-    if (node.type === "folder" && !state.collapsedFolders.has(node.path) && node.children) {
+    const isFolderExpanded = !state.collapsedFolders.has(node.path) || isFiltering;
+    if (node.type === "folder" && isFolderExpanded && node.children) {
       for (let i = node.children.length - 1; i >= 0; i--) {
         stack.push(node.children[i]);
       }
@@ -1661,8 +1680,8 @@ function getPdfPairForDwgCached(node) {
 
 function toggleFolderNode(node, nodeEl) {
   if (!node || node.type !== "folder" || !nodeEl) return;
-  const isCurrentlyCollapsed = state.collapsedFolders.has(node.path);
-  const willBeCollapsed = !isCurrentlyCollapsed;
+  const isCurrentlyExpanded = nodeEl.classList.contains("expanded");
+  const willBeCollapsed = isCurrentlyExpanded;
 
   if (willBeCollapsed) {
     state.collapsedFolders.add(node.path);
@@ -1706,6 +1725,52 @@ function treeFilteringActive() {
   // Поиск, фильтр расширений или фильтр изменений: дерево показываем
   // раскрытым, иначе совпадения внутри свёрнутых папок не найти.
   return Boolean(els.treeSearch.value.trim() || state.activeFilters.size || state.diffFilter);
+}
+
+function updateTreeFilterSummary() {
+  if (!els.treeFilterSummary) return;
+  const totalFiles = state.currentManifest?.statistics?.files || 0;
+  const isFiltering = treeFilteringActive();
+
+  if (!isFiltering || !state.currentManifest?.tree) {
+    els.treeFilterSummary.classList.remove("visible");
+    els.treeFilterSummary.replaceChildren();
+    return;
+  }
+
+  // Считаем отфильтрованные файлы и уникальные папки среди видимых строк
+  let matchedFilesCount = 0;
+  let matchedFoldersCount = 0;
+  for (const node of state.visibleRows) {
+    if (node.type === "file") matchedFilesCount++;
+    else if (node.type === "folder") matchedFoldersCount++;
+  }
+
+  const query = els.treeSearch.value.trim();
+  const filterExts = Array.from(state.activeFilters);
+  const titleParts = [];
+  if (filterExts.length) titleParts.push(filterExts.join(", "));
+  if (query) titleParts.push(`"${query}"`);
+  if (state.diffFilter) titleParts.push("изменения");
+  const filterDesc = titleParts.join(" + ") || "Фильтр";
+
+  const contentSpan = document.createElement("span");
+  contentSpan.innerHTML = `<strong>${escapeHtml(filterDesc)}:</strong> <span class="filter-count-badge">${matchedFilesCount.toLocaleString("ru")}</span> файл. в ${matchedFoldersCount.toLocaleString("ru")} папк. <span style="color:#64748b;">(Всего: ${totalFiles.toLocaleString("ru")})</span>`;
+
+  const resetBtn = document.createElement("span");
+  resetBtn.className = "filter-reset-hint";
+  resetBtn.textContent = "Сбросить";
+  resetBtn.title = "Сбросить текущий фильтр и поиск";
+  resetBtn.addEventListener("click", () => {
+    state.activeFilters.clear();
+    els.treeSearch.value = "";
+    state.diffFilter = false;
+    renderFormats();
+    renderTree();
+  });
+
+  els.treeFilterSummary.replaceChildren(contentSpan, resetBtn);
+  els.treeFilterSummary.classList.add("visible");
 }
 
 function collapseAllFolders() {
@@ -1816,7 +1881,13 @@ function renderTreeNode(rootNode, rootParent) {
     if (node.type === "folder" && node.children) {
       const metaEl = document.createElement("span");
       metaEl.className = "tree-meta";
-      metaEl.textContent = `(${node.children.length})`;
+      if (treeFilteringActive()) {
+        const matchedCount = countMatchedFilesCached(node);
+        metaEl.textContent = `(${matchedCount})`;
+        metaEl.title = `Файлов, подходящих под текущий фильтр в этой папке: ${matchedCount}`;
+      } else {
+        metaEl.textContent = `(${node.children.length})`;
+      }
       content.append(metaEl);
     }
 
@@ -1834,8 +1905,8 @@ function renderTreeNode(rootNode, rootParent) {
     row.addEventListener("click", ((n, el) => (event) => {
       event.stopPropagation();
       if (n.type === "folder") {
-        const wasCollapsed = state.collapsedFolders.has(n.path);
-        if (wasCollapsed && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+        const isCollapsed = !el.classList.contains("expanded");
+        if (isCollapsed && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
           toggleFolderNode(n, el);
         }
         selectNode(n, event);
@@ -2043,7 +2114,9 @@ function renderTree() {
   }
   els.objectTree.replaceChildren(fragment);
   nodeMatchCache = null;
+  folderMatchedFilesCache.clear();
   updateTreeSelectionHighlight();
+  updateTreeFilterSummary();
 }
 
 async function openSelectedObject() {
