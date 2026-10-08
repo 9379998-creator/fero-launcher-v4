@@ -12,9 +12,8 @@ if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
   throw "DWG-              : $InputPath"
 }
 
-#                          :            ,          ,            .pdf
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-  $OutputPath = [System.IO.Path]::ChangeExtension($InputPath, ".pdf")
+  throw "OutputPath must be explicitly provided in cache directory. Writing next to source DWG is prohibited."
 }
 
 $outputDir = Split-Path -Parent $OutputPath
@@ -161,13 +160,28 @@ try {
   $nonEmptyLayouts = @($candidateLayouts | Where-Object { $_.Block.Count -gt 1 })
 
   $pagePdfPaths = [System.Collections.Generic.List[string]]::new()
+  $layoutMetadata = [System.Collections.Generic.List[PSObject]]::new()
 
   Write-Output ("START layouts_total={0} layouts_nonempty={1} input={2}" -f $candidateLayouts.Count, $nonEmptyLayouts.Count, $InputPath)
 
   if ($nonEmptyLayouts.Count -gt 0) {
     #                       
+    $expectedLayoutCount = $nonEmptyLayouts.Count
+
     foreach ($layout in $nonEmptyLayouts) {
       $document.ActiveLayout = $layout
+
+      $rot = 0
+      try { $rot = [int]$layout.PlotRotation } catch {}
+
+      $layoutInfo = [PSCustomObject]@{
+        Name = [string]$layout.Name
+        TabOrder = [int]$layout.TabOrder
+        PlotRotation = $rot
+        ConfigName = [string]$layout.ConfigName
+        CanonicalMediaName = [string]$layout.CanonicalMediaName
+      }
+      $layoutMetadata.Add($layoutInfo)
 
       # BENCH-WINNER: trust stored page setup; touch the plotter only if the
       # current device is missing. No unconditional RefreshPlotDeviceInfo().
@@ -193,7 +207,7 @@ try {
         }
       }
 
-      #                       
+      # CanonicalMediaName
       $availableMedia = @($layout.GetCanonicalMediaNames())
       if ($availableMedia.Count -gt 0) {
         $curMedia = $layout.CanonicalMediaName
@@ -237,12 +251,30 @@ try {
         $pagePdfPaths.Add($pageFile)
         continue
       }
-      if ($document.Plot.PlotToFile($pageFile)) {
-        if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
+      Write-Output ("PLOTTING layout={0} ('{1}')..." -f $layout.TabOrder, $layout.Name)
+      try {
+        $plotted = $document.Plot.PlotToFile($pageFile)
+        if ($plotted -and (Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
           $pagePdfPaths.Add($pageFile)
           Write-Output ("PROGRESS layout={0} done={1}/{2} file={3}" -f $layout.TabOrder, $pagePdfPaths.Count, $nonEmptyLayouts.Count, [System.IO.Path]::GetFileName($pageFile))
+        } else {
+          Write-Output ("WARN: layout={0} PlotToFile returned false or produced invalid file" -f $layout.TabOrder)
+        }
+      } catch {
+        Write-Output ("ERROR plotting layout {0}: {1}" -f $layout.TabOrder, $_.Exception.Message)
+      }
+      [System.GC]::Collect()
+    }
+
+    if ($pagePdfPaths.Count -ne $expectedLayoutCount) {
+      $missing = @()
+      foreach ($l in $nonEmptyLayouts) {
+        $expectedPage = Join-Path $tempDir ("page_{0:D4}.pdf" -f $l.TabOrder)
+        if (-not (Test-Path -LiteralPath $expectedPage) -or (Get-Item -LiteralPath $expectedPage).Length -le 1024) {
+          $missing += ("'{0}' (TabOrder {1})" -f $l.Name, $l.TabOrder)
         }
       }
+      throw ("INCOMPLETE_LAYOUTS: Expected {0} layouts, but only {1} generated. Missing layouts: {2}" -f $expectedLayoutCount, $pagePdfPaths.Count, ($missing -join ", "))
     }
   }
 
@@ -292,6 +324,13 @@ try {
     if ($document.Plot.PlotToFile($modelPageFile)) {
       if ((Test-Path -LiteralPath $modelPageFile) -and (Get-Item -LiteralPath $modelPageFile).Length -gt 1024) {
         $pagePdfPaths.Add($modelPageFile)
+        $layoutMetadata.Add([PSCustomObject]@{
+          Name = "Model"
+          TabOrder = 0
+          PlotRotation = 0
+          ConfigName = [string]$layout.ConfigName
+          CanonicalMediaName = [string]$layout.CanonicalMediaName
+        })
       }
     }
   }
@@ -378,6 +417,31 @@ except ImportError:
       throw "                     PDF                 '$OutputPath': $_"
     }
   }
+
+  $finalDir = Split-Path -Parent $finalDestination
+
+  # Copy individual page PDFs to output directory for direct layout access
+  foreach ($pPath in $pagePdfPaths) {
+    try {
+      $destName = [System.IO.Path]::GetFileName($pPath)
+      Copy-Item -LiteralPath $pPath -Destination (Join-Path $finalDir $destName) -Force -ErrorAction SilentlyContinue
+    } catch {}
+  }
+
+  $manifest = [ordered]@{
+    sourcePath = $InputPath
+    sourceName = [System.IO.Path]::GetFileName($InputPath)
+    pdfPath = $finalDestination
+    pageCount = $pagePdfPaths.Count
+    isComplete = $true
+    layouts = $layoutMetadata
+    renderedAt = (Get-Date).ToString("o")
+    engine = "AutoCAD COM smart-render-v3"
+    progId = $usedProgId
+  }
+  $manifestJson = $manifest | ConvertTo-Json -Depth 5
+  $manifestFile = Join-Path $finalDir "manifest.json"
+  [System.IO.File]::WriteAllText($manifestFile, $manifestJson, [System.Text.Encoding]::UTF8)
 
   $result = @{
     ok = $true

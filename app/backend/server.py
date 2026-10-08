@@ -978,31 +978,24 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
     if not path.is_file() or path.suffix.casefold() != ".dwg":
         raise ValueError(f"Это не DWG-файл: {path}")
 
-    # 1. Проверяем парный PDF рядом с исходником DWG
-    paired_pdf = path.with_suffix(".pdf")
-    if paired_pdf.exists() and paired_pdf.is_file() and paired_pdf.stat().st_size > 1024:
-        try:
-            if paired_pdf.stat().st_mtime_ns >= path.stat().st_mtime_ns:
-                return paired_pdf, True
-        except OSError:
-            pass
-
-    # 2. Проверяем резервный кэш
-    key = file_cache_key(path, "dwg-smart-cad-v2")
+    # Output PDF is stored strictly inside the runtime cache. Source directory is never written to.
+    key = file_cache_key(path, "dwg-smart-cad-v3")
     target_dir = DWG_CACHE_DIR / key
     target_dir.mkdir(parents=True, exist_ok=True)
-    fallback_pdf = target_dir / f"{path.stem}.pdf"
+    cache_pdf = target_dir / f"{path.stem}.pdf"
     manifest_path = target_dir / "manifest.json"
-    if fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024 and manifest_path.exists():
+
+    # Verify cache hit with strict completeness check
+    if cache_pdf.exists() and cache_pdf.stat().st_size > 1024 and manifest_path.exists():
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if (
                 manifest.get("sourcePath") == str(path)
-                and manifest.get("cacheKey") == key
+                and manifest.get("isComplete") is True
                 and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
                 and manifest.get("sourceSize") == path.stat().st_size
             ):
-                return fallback_pdf, True
+                return cache_pdf, True
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -1011,18 +1004,16 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
     try:
         process = dwg_convert_process(
             path=path,
-            paired_pdf=paired_pdf,
-            fallback_pdf=fallback_pdf,
+            paired_pdf=cache_pdf,
+            fallback_pdf=cache_pdf,
             script_to_run=script_to_run,
         )
         if process.returncode != 0:
             message = process.stderr.strip() or process.stdout.strip() or "CAD-система (AutoCAD) не смогла создать PDF для чертежа"
             raise RuntimeError(message)
 
-        if paired_pdf.exists() and paired_pdf.stat().st_size > 1024:
-            final_pdf = paired_pdf
-        elif fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024:
-            final_pdf = fallback_pdf
+        if cache_pdf.exists() and cache_pdf.stat().st_size > 1024:
+            final_pdf = cache_pdf
         else:
             for line in reversed((process.stdout or "").splitlines()):
                 line = line.strip()
@@ -1053,12 +1044,12 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
             pdf_bytes = img_doc.convert_to_pdf()
             img_doc.close()
 
-            fallback_pdf.write_bytes(pdf_bytes)
-            final_pdf = fallback_pdf
+            cache_pdf.write_bytes(pdf_bytes)
+            final_pdf = cache_pdf
         except Exception as fallback_err:
             raise RuntimeError(f"Сбой рендера DWG: {cad_err} (фолбэк: {fallback_err})")
 
-    if final_pdf == fallback_pdf:
+    if final_pdf == cache_pdf and not manifest_path.exists():
         manifest_path.write_text(
             json.dumps(
                 {
@@ -1067,8 +1058,9 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
                     "sourceMtimeNs": path.stat().st_mtime_ns,
                     "sourceSize": path.stat().st_size,
                     "cacheKey": key,
-                    "pdfPath": str(fallback_pdf),
+                    "pdfPath": str(cache_pdf),
                     "mode": "smart-layouts-fallback-cache",
+                    "isComplete": False,
                     "renderedAt": datetime.now().isoformat(timespec="seconds"),
                 },
                 ensure_ascii=False,
@@ -1109,26 +1101,19 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     if not path.is_file() or path.suffix.casefold() != ".dwg":
         raise ValueError(f"Это не DWG-файл: {path}")
 
-    # 1. Проверяем, есть ли уже готовый векторный PDF (парный или в кэше)
-    paired_pdf = path.with_suffix(".pdf")
-    key = file_cache_key(path, "dwg-smart-cad-v2")
+    # 1. Проверяем, есть ли уже готовый векторный PDF в изолированном кэше
+    key = file_cache_key(path, "dwg-smart-cad-v3")
     target_dir = DWG_CACHE_DIR / key
     target_dir.mkdir(parents=True, exist_ok=True)
-    fallback_pdf = target_dir / f"{path.stem}.pdf"
+    cache_pdf = target_dir / f"{path.stem}.pdf"
     manifest_path = target_dir / "manifest.json"
     has_cached_pdf = False
-    if paired_pdf.exists() and paired_pdf.is_file() and paired_pdf.stat().st_size > 1024:
-        try:
-            if paired_pdf.stat().st_mtime_ns >= path.stat().st_mtime_ns:
-                has_cached_pdf = True
-        except OSError:
-            pass
-    if not has_cached_pdf and fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024 and manifest_path.exists():
+    if cache_pdf.exists() and cache_pdf.stat().st_size > 1024 and manifest_path.exists():
         try:
             m = json.loads(manifest_path.read_text(encoding="utf-8"))
             if (
                 m.get("sourcePath") == str(path)
-                and m.get("cacheKey") == key
+                and m.get("isComplete") is True
                 and m.get("sourceMtimeNs") == path.stat().st_mtime_ns
                 and m.get("sourceSize") == path.stat().st_size
             ):

@@ -42,6 +42,9 @@ temp/
 # Backups
 *.bak
 
+# Local research & isolated test paths
+.local-research/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -142,7 +142,7 @@ function Convert-DwgJob($job, $cadApp, $usedProgId) {
     throw "DWG-файл не найден: $InputPath"
   }
   if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = [System.IO.Path]::ChangeExtension($InputPath, ".pdf")
+    throw "OutputPath must be explicitly provided in cache directory. Writing next to source DWG is prohibited."
   }
   $outputDir = Split-Path -Parent $OutputPath
   if (-not [string]::IsNullOrWhiteSpace($outputDir) -and -not (Test-Path -LiteralPath $outputDir)) {
@@ -165,10 +165,25 @@ function Convert-DwgJob($job, $cadApp, $usedProgId) {
     $nonEmptyLayouts = @($candidateLayouts | Where-Object { $_.Block.Count -gt 1 })
 
     $pagePdfPaths = [System.Collections.Generic.List[string]]::new()
+    $layoutMetadata = [System.Collections.Generic.List[PSObject]]::new()
 
     if ($nonEmptyLayouts.Count -gt 0) {
+      $expectedLayoutCount = $nonEmptyLayouts.Count
       foreach ($layout in $nonEmptyLayouts) {
         $document.ActiveLayout = $layout
+
+        $rot = 0
+        try { $rot = [int]$layout.PlotRotation } catch {}
+
+        $layoutInfo = [PSCustomObject]@{
+          Name = [string]$layout.Name
+          TabOrder = [int]$layout.TabOrder
+          PlotRotation = $rot
+          ConfigName = [string]$layout.ConfigName
+          CanonicalMediaName = [string]$layout.CanonicalMediaName
+        }
+        $layoutMetadata.Add($layoutInfo)
+
         $layout.RefreshPlotDeviceInfo()
 
         $devices = @($layout.GetPlotDeviceNames())
@@ -217,6 +232,17 @@ function Convert-DwgJob($job, $cadApp, $usedProgId) {
             $pagePdfPaths.Add($pageFile)
           }
         }
+      }
+
+      if ($pagePdfPaths.Count -ne $expectedLayoutCount) {
+        $missing = @()
+        foreach ($l in $nonEmptyLayouts) {
+          $expectedPage = Join-Path $tempDir ("page_{0:D4}.pdf" -f $l.TabOrder)
+          if (-not (Test-Path -LiteralPath $expectedPage) -or (Get-Item -LiteralPath $expectedPage).Length -le 1024) {
+            $missing += ("'{0}' (TabOrder {1})" -f $l.Name, $l.TabOrder)
+          }
+        }
+        throw ("INCOMPLETE_LAYOUTS: Expected {0} layouts, but only {1} generated. Missing layouts: {2}" -f $expectedLayoutCount, $pagePdfPaths.Count, ($missing -join ", "))
       }
     }
 
@@ -320,6 +346,31 @@ except ImportError:
         throw "Не удалось сохранить PDF в целевую папку '$OutputPath': $_"
       }
     }
+
+    $finalDir = Split-Path -Parent $finalDestination
+
+    # Copy individual page PDFs to output directory for direct layout access
+    foreach ($pPath in $pagePdfPaths) {
+      try {
+        $destName = [System.IO.Path]::GetFileName($pPath)
+        Copy-Item -LiteralPath $pPath -Destination (Join-Path $finalDir $destName) -Force -ErrorAction SilentlyContinue
+      } catch {}
+    }
+
+    $manifest = [ordered]@{
+      sourcePath = $InputPath
+      sourceName = [System.IO.Path]::GetFileName($InputPath)
+      pdfPath = $finalDestination
+      pageCount = $pagePdfPaths.Count
+      isComplete = $true
+      layouts = $layoutMetadata
+      renderedAt = (Get-Date).ToString("o")
+      engine = "AutoCAD COM daemon-v3"
+      progId = $usedProgId
+    }
+    $manifestJson = $manifest | ConvertTo-Json -Depth 5
+    $manifestFile = Join-Path $finalDir "manifest.json"
+    [System.IO.File]::WriteAllText($manifestFile, $manifestJson, [System.Text.Encoding]::UTF8)
 
     return @{
       ok = $true
