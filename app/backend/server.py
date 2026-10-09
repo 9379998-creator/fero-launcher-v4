@@ -426,9 +426,9 @@ def list_object_summaries() -> list[dict]:
     return sorted(manifests, key=lambda item: str(item.get("scannedAt", "")), reverse=True)
 
 
-def pdf_cache_key(path: Path, dpi: int) -> str:
+def pdf_cache_key(path: Path, dpi: int = 0) -> str:
     stat = path.stat()
-    raw = f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|{dpi}"
+    raw = f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}"
     return hashlib.sha1(raw.casefold().encode("utf-8")).hexdigest()[:20]
 
 
@@ -467,7 +467,7 @@ def read_pdf_cache_manifest(path: Path, dpi: int, key: str, target_dir: Path) ->
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             manifest = None
-        if manifest and (manifest.get("path") != str(path) or manifest.get("dpi") != dpi or manifest.get("cacheKey") != key):
+        if manifest and (manifest.get("path") != str(path) or manifest.get("cacheKey") != key):
             manifest = None
     if not manifest:
         legacy_items = []
@@ -2643,8 +2643,8 @@ def render_pdf(
 
         # Для каталогов и больших PDF (> 50 страниц) не рендерим сотни страниц в память/диск за один запрос:
         # первично отдаём окно первых 20 страниц, остальные подгружаются лениво по номерам страниц (/api/pdf/page)
-        MAX_INITIAL_PAGES = 20
-        pages_to_render = 1 if first_page_only else min(page_count, MAX_INITIAL_PAGES if page_count > 50 else page_count)
+        MAX_INITIAL_PAGES = 3 # Only render a small buffer synchronously
+        pages_to_render = 1 if first_page_only else min(page_count, MAX_INITIAL_PAGES)
         for page_idx in range(pages_to_render):
             page_num = page_idx + 1
             png = target_dir / f"page-{page_num}.png"
@@ -2660,8 +2660,14 @@ def render_pdf(
                     errors.append({"page": page_num, "error": str(err)})
                     continue
 
-            if png.exists() and png.stat().st_size > 0:
-                pages.append(pdf_page_item(path, key, page_num, png))
+        for page_num in range(1, page_count + 1):
+            png = target_dir / f"page-{page_num}.png"
+            pages.append({
+                "page": page_num,
+                "name": f"{path.name} — стр. {page_num}",
+                "url": f"/cache/pdf/{key}/{png.name}",
+                "bytes": png.stat().st_size if png.exists() else 0,
+            })
 
         doc.close()
 
@@ -2699,7 +2705,7 @@ def render_pdf(
     rendered_count = 0
     cache_hit_count = 0
 
-    pages_to_render = 1 if first_page_only else page_count
+    pages_to_render = 1 if first_page_only else min(page_count, 3)
     for page in range(1, pages_to_render + 1):
         if time.monotonic() - started_at > PDF_DOCUMENT_TIMEOUT_SECONDS:
             for skipped_page in range(page, pages_to_render + 1):
@@ -2743,8 +2749,14 @@ def render_pdf(
                 errors.append({"page": page, "error": str(error)})
                 continue
 
-        if png.exists() and png.stat().st_size > 0:
-            pages.append(pdf_page_item(path, key, page, png))
+    for page_num in range(1, page_count + 1):
+        png = target_dir / f"page-{page_num}.png"
+        pages.append({
+            "page": page_num,
+            "name": f"{path.name} — стр. {page_num}",
+            "url": f"/cache/pdf/{key}/{png.name}",
+            "bytes": png.stat().st_size if png.exists() else 0,
+        })
 
     if not pages:
         result = run_poppler(
@@ -3047,16 +3059,83 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if not target.exists() or not target.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND, "File not found")
                     return
+                
                 content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-                body = target.read_bytes()
+                file_size = target.stat().st_size
+                range_header = self.headers.get("Range")
+                
+                if range_header and range_header.startswith("bytes="):
+                    try:
+                        # Handle multiple ranges by ignoring them or picking the first one (RFC 9110 compliant fallback)
+                        range_str = range_header.replace("bytes=", "").split(",")[0].strip()
+                        ranges = range_str.split("-")
+                        print("RANGE PARSED:", ranges)
+                        
+                        if ranges[0] == "":
+                            # Suffix request: bytes=-1024
+                            suffix_length = int(ranges[1])
+                            start = max(0, file_size - suffix_length)
+                            end = file_size - 1
+                        else:
+                            start = int(ranges[0])
+                            end = int(ranges[1]) if len(ranges) > 1 and ranges[1] else file_size - 1
+                        
+                        # Limit end to file size
+                        end = min(end, file_size - 1)
+                        
+                        if start >= file_size or start > end:
+                            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                            self._apply_cors_headers()
+                            self.send_header("Content-Range", f"bytes */{file_size}")
+                            self.end_headers()
+                            return
+                        
+                        chunk_size = end - start + 1
+                        self.send_response(HTTPStatus.PARTIAL_CONTENT)
+                        self.send_header("Content-Type", content_type)
+                        self.send_header("Content-Length", str(chunk_size))
+                        self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                        self.send_header("Accept-Ranges", "bytes")
+                        self._apply_cors_headers()
+                        self.end_headers()
+                        
+                        with target.open("rb") as f:
+                            f.seek(start)
+                            bytes_to_read = chunk_size
+                            while bytes_to_read > 0:
+                                chunk = f.read(min(65536, bytes_to_read))
+                                if not chunk:
+                                    break
+                                try:
+                                    self.wfile.write(chunk)
+                                except BrokenPipeError:
+                                    break
+                                bytes_to_read -= len(chunk)
+                        return
+                    except Exception as error:
+                        import traceback
+                        self.send_error(500, f"Range Error: {error}\n{traceback.format_exc()}")
+                        return
+
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Length", str(file_size))
+                self.send_header("Accept-Ranges", "bytes")
+                self._apply_cors_headers()
                 self.end_headers()
-                self.wfile.write(body)
+                
+                with target.open("rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                pass
             except Exception as error:
                 self.send_error(HTTPStatus.BAD_REQUEST, str(error))
             return
+
 
         if parsed.path == "/api/dwg/thumbnail":
             try:
@@ -3701,8 +3780,25 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         if not target.exists() or not target.is_file():
-            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
-            return
+            if relative.startswith("pdf/"):
+                parts = relative.split("/")
+                if len(parts) == 3:
+                    import re
+                    match = re.match(r"^page-(\d+)\.png$", parts[2])
+                    if match:
+                        manifest_path = target.parent / "manifest.json"
+                        if manifest_path.exists():
+                            try:
+                                import json
+                                manifest = json.loads(manifest_path.read_text("utf-8"))
+                                original_path = Path(manifest["path"])
+                                dpi = manifest.get("dpi", DEFAULT_PDF_DPI)
+                                render_pdf_page(original_path, int(match.group(1)), dpi)
+                            except Exception as e:
+                                self.log_message(f"Lazy render failed: {e}")
+            if not target.exists() or not target.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+                return
 
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         body = target.read_bytes()

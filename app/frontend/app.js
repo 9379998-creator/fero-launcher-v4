@@ -2858,6 +2858,7 @@ function createPageThumbElement(page) {
     thumb.append(missing);
   } else {
     const img = document.createElement("img");
+    img.loading = "lazy";
     img.src = page.url;
     img.alt = page.name;
     img.draggable = false;
@@ -3221,6 +3222,108 @@ async function fillTxtThumbPreview(page, el) {
   }
 }
 
+const pdfjsCache = new Map();
+let activePdfRenderTask = null;
+let viewerGeneration = 0;
+
+async function getPdfjsDocument(path) {
+  if (pdfjsCache.has(path)) {
+    return pdfjsCache.get(path).docPromise;
+  }
+  const rawUrl = `/api/file/raw?path=${encodeURIComponent(path)}`;
+  const loadingTask = pdfjsLib.getDocument({
+    url: rawUrl,
+    isEvalSupported: false // SECURITY (CVE-2024-4367) bypass
+  });
+  const docPromise = loadingTask.promise;
+  pdfjsCache.set(path, { docPromise, lastUsed: Date.now() });
+  
+  if (pdfjsCache.size > 5) {
+    let oldest = null;
+    let oldestTime = Infinity;
+    for (const [k, v] of pdfjsCache.entries()) {
+      if (v.lastUsed < oldestTime) {
+        oldestTime = v.lastUsed;
+        oldest = k;
+      }
+    }
+    if (oldest && oldest !== path) {
+      pdfjsCache.get(oldest).docPromise.then(doc => doc.destroy()).catch(()=>{});
+      pdfjsCache.delete(oldest);
+    }
+  }
+  return docPromise;
+}
+
+async function renderPdfJsPage(pageObj) {
+  const currentGen = ++viewerGeneration;
+  const sourcePath = pageObj.documentPath || pageObj.path || pageObj.sourcePath;
+  const pageNum = Number(pageObj.page) || 1;
+  const canvas = document.getElementById("pdfPageCanvas");
+  if (!canvas) return;
+  
+  try {
+    const pdfDoc = await getPdfjsDocument(sourcePath);
+    if (currentGen !== viewerGeneration) return;
+    
+    if (pdfjsCache.has(sourcePath)) {
+      pdfjsCache.get(sourcePath).lastUsed = Date.now();
+    }
+    
+    const page = await pdfDoc.getPage(pageNum);
+    if (currentGen !== viewerGeneration) return;
+    
+    if (activePdfRenderTask) {
+      try {
+        await activePdfRenderTask.cancel();
+      } catch (e) {}
+      activePdfRenderTask = null;
+    }
+    
+    // Dynamic scale to prevent 5GB memory crashes on heavy architectural sheets
+    const dpr = window.devicePixelRatio || 1;
+    let targetScale = (state.view.scale || 1.0) * dpr;
+    if (targetScale < 1.5) targetScale = 1.5; // Baseline quality
+    
+    let viewport = page.getViewport({ scale: targetScale });
+    
+    // Max safe limits (16M pixels area or 8000px side)
+    const MAX_PIXELS = 16777216;
+    const MAX_DIM = 8000;
+    let area = viewport.width * viewport.height;
+    
+    if (area > MAX_PIXELS || viewport.width > MAX_DIM || viewport.height > MAX_DIM) {
+      const scaleDown = Math.min(
+        Math.sqrt(MAX_PIXELS / area),
+        MAX_DIM / viewport.width,
+        MAX_DIM / viewport.height
+      );
+      targetScale = targetScale * scaleDown;
+      viewport = page.getViewport({ scale: targetScale });
+    }
+    
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    
+    const renderContext = {
+      canvasContext: canvas.getContext("2d"),
+      viewport: viewport
+    };
+    
+    activePdfRenderTask = page.render(renderContext);
+    await activePdfRenderTask.promise;
+    
+    if (currentGen === viewerGeneration) {
+      els.pdfPageImage.hidden = true;
+      canvas.hidden = false;
+      applyPageView();
+    }
+  } catch (err) {
+    if (err.name === 'RenderingCancelledException') return;
+    console.error("PDF.js render error:", err);
+  }
+}
+
 function showPdfPage(page, options = {}) {
   const key = pageKey(page);
   state.activePageKey = key;
@@ -3237,6 +3340,8 @@ function showPdfPage(page, options = {}) {
     state.activePageUrl = page.url;
     els.pdfPageImage.src = page.url;
     els.pdfPageImage.hidden = false;
+    const canvas = document.getElementById("pdfPageCanvas");
+    if (canvas) canvas.hidden = true;
     els.viewerEmpty.hidden = true;
     els.pdfViewer.classList.remove("empty");
     els.viewerControls.hidden = false;
@@ -3254,6 +3359,8 @@ function showPdfPage(page, options = {}) {
     state.activePageUrl = "";
     els.pdfPageImage.hidden = true;
     els.pdfPageImage.removeAttribute("src");
+    const canvas = document.getElementById("pdfPageCanvas");
+    if (canvas) canvas.hidden = true;
     els.viewerEmpty.hidden = true;
     els.pdfViewer.classList.remove("empty");
     els.viewerControls.hidden = false;
@@ -3271,6 +3378,8 @@ function showPdfPage(page, options = {}) {
     state.activePageUrl = "";
     els.pdfPageImage.hidden = true;
     els.pdfPageImage.removeAttribute("src");
+    const canvas = document.getElementById("pdfPageCanvas");
+    if (canvas) canvas.hidden = true;
     els.viewerEmpty.hidden = false;
 
     const ext = (page.sourceType || "").toUpperCase();
@@ -3302,10 +3411,10 @@ function showPdfPage(page, options = {}) {
     const nativeCard = els.viewerEmpty.querySelector(".native-file-card");
     if (nativeCard) {
       const openBtn = nativeCard.querySelector("#nativeCardOpenBtn");
-    if (openBtn) {
-      openBtn.addEventListener("click", () => openFileByPath(sourcePath, "native"));
-    }
-    nativeCard.addEventListener("contextmenu", (event) => {
+      if (openBtn) {
+        openBtn.addEventListener("click", () => openFileByPath(sourcePath, "native"));
+      }
+      nativeCard.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         event.stopPropagation();
         showFileContextMenu(event.clientX, event.clientY, {
@@ -3332,12 +3441,21 @@ function showPdfPage(page, options = {}) {
   state.activePageUrl = displayPage.url;
   els.pdfPageImage.src = displayPage.url;
   els.pdfPageImage.hidden = false;
+  const canvas = document.getElementById("pdfPageCanvas");
+  if (canvas) canvas.hidden = true;
   els.viewerEmpty.hidden = true;
   els.pdfViewer.classList.remove("empty");
   els.viewerControls.hidden = false;
   updateActivePdfThumb();
   if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) applyPageView();
-  requestHighQualityPage(page);
+  
+  const isPdf = String(targetDocPath).toLowerCase().endsWith(".pdf");
+  if (isPdf) {
+    renderPdfJsPage(page);
+  } else {
+    requestHighQualityPage(page);
+  }
+  
   updatePagePosition(page);
   checkAndShowPdfToc(targetDocPath, page.page);
 }
@@ -3368,12 +3486,17 @@ function clampPan() {
 function updateViewTransform() {
   const view = state.view;
   clampPan();
-  els.pdfPageImage.style.transform = [
+  const transform = [
     "translate(-50%, -50%)",
     `translate(${view.panX}px, ${view.panY}px)`,
     `rotate(${view.rotation}deg)`,
     `scale(${view.scale})`,
   ].join(" ");
+  els.pdfPageImage.style.transform = transform;
+  
+  const canvas = document.getElementById("pdfPageCanvas");
+  if (canvas) canvas.style.transform = transform;
+
   els.pdfStage.classList.toggle("pan-mode", view.panMode);
   els.pdfStage.classList.toggle("dragging", view.dragging);
   if (state.excelWorkbook) {
@@ -3387,7 +3510,13 @@ function fitPdfPage() {
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
     return;
   }
-  if (!els.pdfPageImage.naturalWidth || !els.pdfPageImage.naturalHeight) return;
+  
+  const canvas = document.getElementById("pdfPageCanvas");
+  const isCanvasActive = canvas && !canvas.hidden;
+  const contentWidth = isCanvasActive ? canvas.width : els.pdfPageImage.naturalWidth;
+  const contentHeight = isCanvasActive ? canvas.height : els.pdfPageImage.naturalHeight;
+  
+  if (!contentWidth || !contentHeight) return;
   const stage = els.pdfStage.getBoundingClientRect();
   // Сцена ещё не разложена (нулевые размеры): не портим масштаб крошечным
   // вписыванием, дождёмся следующего кадра.
@@ -3396,8 +3525,8 @@ function fitPdfPage() {
     return;
   }
   const rotated = Math.abs(state.view.rotation % 180) === 90;
-  const imageWidth = rotated ? els.pdfPageImage.naturalHeight : els.pdfPageImage.naturalWidth;
-  const imageHeight = rotated ? els.pdfPageImage.naturalWidth : els.pdfPageImage.naturalHeight;
+  const imageWidth = rotated ? contentHeight : contentWidth;
+  const imageHeight = rotated ? contentWidth : contentHeight;
   const availableWidth = Math.max(100, stage.width - 36);
   const availableHeight = Math.max(100, stage.height - 86);
   const fit = Math.min(availableWidth / imageWidth, availableHeight / imageHeight);
