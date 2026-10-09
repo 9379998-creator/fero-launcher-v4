@@ -3304,6 +3304,8 @@ async function renderPdfJsPage(pageObj) {
     
     canvas.width = viewport.width;
     canvas.height = viewport.height;
+    canvas.style.width = (viewport.width / dpr) + "px";
+    canvas.style.height = (viewport.height / dpr) + "px";
     
     const renderContext = {
       canvasContext: canvas.getContext("2d"),
@@ -3562,7 +3564,9 @@ function zoomPdf(factor, originX = null, originY = null) {
     els.wordDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.wordScale }, "*");
     return;
   }
-  if (els.pdfPageImage.hidden) return;
+  const canvas = document.getElementById("pdfPageCanvas");
+  const isCanvasActive = canvas && !canvas.hidden;
+  if (els.pdfPageImage.hidden && !isCanvasActive) return;
   const oldScale = state.view.scale;
   const newScale = Math.min(8, Math.max(0.05, oldScale * factor));
   if (newScale === oldScale) return;
@@ -4688,7 +4692,7 @@ if (els.pdfTocSearch) {
 }
 
 // Кнопка «Копировать ссылку на страницу и узел» (Deep Link для тендерных ведомостей)
-if (els.viewCopyLink) {
+if (els.viewCopyLink) { els.viewCopyLink.style.display = "none";
   els.viewCopyLink.addEventListener("click", () => {
     const page = (state.renderedPages || []).find((p) => {
       try { return pageKey(p) === state.activePageKey; } catch (_) { return false; }
@@ -4863,7 +4867,7 @@ if (els.scaleResetBtn) {
       state.view.rotation = 0;
       els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: 0 }, "*");
       els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
-    } else if (!els.pdfPageImage.hidden) {
+    } else if (!els.pdfPageImage.hidden || (document.getElementById("pdfPageCanvas") && !document.getElementById("pdfPageCanvas").hidden)) {
       state.view.rotation = 0;
       state.view.userZoomed = false;
       fitPdfPage();
@@ -4877,7 +4881,9 @@ if (els.scaleResetBtn) {
 if (els.scaleMinusBtn) {
   els.scaleMinusBtn.addEventListener("click", () => {
     const isStageViewing = state.viewMode === "full" || els.pdfViewer?.classList.contains("stage-active");
-    if (isStageViewing && (!els.pdfPageImage.hidden || state.excelWorkbook)) {
+    const canvas = document.getElementById("pdfPageCanvas");
+    const isCanvasActive = canvas && !canvas.hidden;
+    if (isStageViewing && (!els.pdfPageImage.hidden || isCanvasActive || state.excelWorkbook)) {
       zoomPdf(0.89);
     } else {
       zoomTree(0.9);
@@ -4889,7 +4895,9 @@ if (els.scaleMinusBtn) {
 if (els.scalePlusBtn) {
   els.scalePlusBtn.addEventListener("click", () => {
     const isStageViewing = state.viewMode === "full" || els.pdfViewer?.classList.contains("stage-active");
-    if (isStageViewing && (!els.pdfPageImage.hidden || state.excelWorkbook)) {
+    const canvas = document.getElementById("pdfPageCanvas");
+    const isCanvasActive = canvas && !canvas.hidden;
+    if (isStageViewing && (!els.pdfPageImage.hidden || isCanvasActive || state.excelWorkbook)) {
       zoomPdf(1.12);
     } else {
       zoomTree(1.1);
