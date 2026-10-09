@@ -52,3 +52,152 @@ def init_db():
 if __name__ == "__main__":
     init_db()
     print("Database initialized at", DB_PATH.absolute())
+
+import os
+
+def sync_root_to_db(root: Path):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # Ensure root exists
+        cursor.execute("INSERT OR IGNORE INTO roots (path, is_active) VALUES (?, 1)", (str(root.resolve()),))
+        cursor.execute("SELECT id FROM roots WHERE path = ?", (str(root.resolve()),))
+        root_id = cursor.fetchone()[0]
+
+        # Scan disk and collect existing files
+        disk_files = {}
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Skip hidden/system directories
+            dirnames[:] = [d for d in dirnames if d not in {".git", ".svn", "__pycache__", "node_modules", "runtime"}]
+            rel_dir = Path(dirpath).relative_to(root)
+            
+            for file in filenames:
+                if file.startswith("~$") or file.startswith(".~"):
+                    continue
+                file_path = Path(dirpath) / file
+                rel_path = str(rel_dir / file).replace("\\", "/")
+                if rel_path.startswith("./"):
+                    rel_path = rel_path[2:]
+                
+                try:
+                    stat = file_path.stat()
+                    disk_files[rel_path] = {
+                        "name": file,
+                        "ext": file_path.suffix.lstrip(".").upper(),
+                        "size": stat.st_size,
+                        "mtime_ns": stat.st_mtime_ns
+                    }
+                except OSError:
+                    pass
+        
+        # Fetch existing DB files
+        cursor.execute("SELECT id, rel_path, size, mtime_ns FROM documents WHERE root_id = ?", (root_id,))
+        db_files = {row["rel_path"]: row for row in cursor.fetchall()}
+        
+        # Determine inserts, updates, deletes
+        to_insert = []
+        to_update = []
+        to_delete_ids = []
+        
+        for rel_path, disk_stat in disk_files.items():
+            if rel_path not in db_files:
+                to_insert.append((root_id, rel_path, disk_stat["name"], disk_stat["ext"], disk_stat["size"], disk_stat["mtime_ns"]))
+            else:
+                db_stat = db_files[rel_path]
+                if db_stat["size"] != disk_stat["size"] or db_stat["mtime_ns"] != disk_stat["mtime_ns"]:
+                    to_update.append((disk_stat["size"], disk_stat["mtime_ns"], root_id, rel_path))
+                    
+        for rel_path, db_stat in db_files.items():
+            if rel_path not in disk_files:
+                to_delete_ids.append((db_stat["id"],))
+                
+        if to_insert:
+            cursor.executemany("INSERT INTO documents (root_id, rel_path, name, ext, size, mtime_ns) VALUES (?, ?, ?, ?, ?, ?)", to_insert)
+        if to_update:
+            cursor.executemany("UPDATE documents SET size = ?, mtime_ns = ?, content_hash = NULL WHERE root_id = ? AND rel_path = ?", to_update)
+            # Setting content_hash = NULL triggers background re-hashing
+        if to_delete_ids:
+            cursor.executemany("DELETE FROM documents WHERE id = ?", to_delete_ids)
+            
+        conn.commit()
+        return root_id
+    finally:
+        conn.close()
+
+def build_tree_from_db(root: Path, root_id: int):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT rel_path, name, ext, size FROM documents WHERE root_id = ?", (root_id,))
+        rows = cursor.fetchall()
+        
+        root_node = {
+            "type": "folder",
+            "name": root.name,
+            "path": str(root.resolve()),
+            "children": {}
+        }
+        
+        file_count = 0
+        ext_counts = {}
+        
+        for row in rows:
+            rel_path = row["rel_path"]
+            parts = rel_path.split("/")
+            
+            current_dict = root_node["children"]
+            current_abs_path = Path(root)
+            
+            # Build directory structure
+            for i, part in enumerate(parts[:-1]):
+                current_abs_path = current_abs_path / part
+                if part not in current_dict:
+                    current_dict[part] = {
+                        "type": "folder",
+                        "name": part,
+                        "path": str(current_abs_path),
+                        "children": {}
+                    }
+                current_dict = current_dict[part]["children"]
+            
+            # Insert file
+            filename = parts[-1]
+            ext = row["ext"]
+            file_abs_path = current_abs_path / filename
+            current_dict[filename] = {
+                "type": "file",
+                "name": row["name"],
+                "path": str(file_abs_path),
+                "extension": ext,
+                "size": row["size"]
+            }
+            
+            file_count += 1
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+            
+        # Convert children dicts to lists recursively
+        def dict_to_list(node):
+            if node["type"] == "folder":
+                children_list = list(node["children"].values())
+                # Sort: folders first, then files alphabetically
+                children_list.sort(key=lambda x: (x["type"] == "file", x["name"].lower()))
+                node["children"] = children_list
+                for child in children_list:
+                    dict_to_list(child)
+            return node
+            
+        tree = dict_to_list(root_node)
+        
+        # Count folders
+        folder_count = 0
+        stack = [tree]
+        while stack:
+            n = stack.pop()
+            if n["type"] == "folder":
+                folder_count += 1
+                stack.extend(n["children"])
+                
+        return tree, ext_counts, folder_count - 1, file_count
+    finally:
+        conn.close()

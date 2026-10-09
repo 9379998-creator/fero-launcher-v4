@@ -305,11 +305,18 @@ def scan_object(raw_path: str) -> dict:
     if not root.is_dir():
         raise NotADirectoryError(f"Это не папка: {root}")
 
+    import app.backend.db as db
+
     object_id = object_id_for_path(root)
     previous = load_manifest(object_id)
     previous_tree = (previous or {}).get("tree")
 
-    tree, extension_counts, folder_count, file_count = build_tree(root)
+    # Sync disk to SQLite
+    root_id = db.sync_root_to_db(root)
+    
+    # Build tree from SQLite
+    tree, extension_counts, folder_count, file_count = db.build_tree_from_db(root, root_id)
+    
     last_diff = diff_trees(previous_tree, tree)
     manifest = {
         "id": object_id,
@@ -3857,6 +3864,14 @@ def main() -> None:
         print(f"[Startup Warn] Native apps initialization skipped: {init_err}", file=sys.stderr, flush=True)
 
     atexit.register(lambda: kill_dwg_daemon("server-exit"))
+
+    # Initialize SQLite DB
+    import app.backend.db as db
+    db.init_db()
+
+    # Start background hashing thread
+    import app.backend.background_sync as bg
+    bg.start_background_sync()
 
     try:
         server = ThreadingHTTPServer((args.host, args.port), LauncherHandler)
