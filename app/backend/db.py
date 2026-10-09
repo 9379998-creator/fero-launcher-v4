@@ -50,6 +50,67 @@ def init_db():
             FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
             UNIQUE (document_id, type)
         );
+
+        -- STEP 3: Analytics and Commercial Proposals
+        
+        CREATE TABLE IF NOT EXISTS parsed_elements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            source_hash TEXT NOT NULL, 
+            page_number INTEGER,
+            element_type TEXT NOT NULL,
+            area_m2 REAL,
+            perimeter_m REAL,
+            count INTEGER,
+            metadata TEXT,
+            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS unit_rates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            work_category TEXT NOT NULL,
+            material_name TEXT NOT NULL,
+            unit_type TEXT NOT NULL,
+            price_per_unit REAL NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS specifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS specification_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            specification_id INTEGER NOT NULL,
+            parsed_element_id INTEGER NOT NULL,
+            unit_rate_id INTEGER NOT NULL,
+            FOREIGN KEY (specification_id) REFERENCES specifications(id) ON DELETE CASCADE,
+            FOREIGN KEY (parsed_element_id) REFERENCES parsed_elements(id),
+            FOREIGN KEY (unit_rate_id) REFERENCES unit_rates(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS estimates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_name TEXT NOT NULL,
+            total_price REAL NOT NULL DEFAULT 0.0,
+            status TEXT NOT NULL DEFAULT 'draft',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS estimate_rows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            estimate_id INTEGER NOT NULL,
+            specification_item_id INTEGER NOT NULL,
+            snapshot_price_per_unit REAL NOT NULL,
+            snapshot_quantity REAL NOT NULL,
+            computed_cost REAL NOT NULL,
+            FOREIGN KEY (estimate_id) REFERENCES estimates(id) ON DELETE CASCADE,
+            FOREIGN KEY (specification_item_id) REFERENCES specification_items(id)
+        );
         """)
         conn.commit()
     finally:
