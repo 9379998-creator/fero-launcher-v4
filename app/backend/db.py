@@ -9,8 +9,11 @@ DB_PATH = DB_DIR / "launcher.sqlite"
 
 def get_connection() -> sqlite3.Connection:
     DB_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
     return conn
 
 def init_db():
@@ -31,7 +34,9 @@ def init_db():
             ext TEXT NOT NULL,
             size INTEGER NOT NULL,
             mtime_ns INTEGER NOT NULL,
-            content_hash TEXT,
+            observed_revision INTEGER NOT NULL DEFAULT 1,
+            hash_state TEXT NOT NULL DEFAULT 'pending',
+            verified_content_hash TEXT,
             FOREIGN KEY (root_id) REFERENCES roots(id) ON DELETE CASCADE,
             UNIQUE (root_id, rel_path)
         );
@@ -41,6 +46,7 @@ def init_db():
             document_id INTEGER NOT NULL,
             type TEXT NOT NULL,
             data TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ready',
             FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
             UNIQUE (document_id, type)
         );
@@ -115,8 +121,8 @@ def sync_root_to_db(root: Path):
         if to_insert:
             cursor.executemany("INSERT INTO documents (root_id, rel_path, name, ext, size, mtime_ns) VALUES (?, ?, ?, ?, ?, ?)", to_insert)
         if to_update:
-            cursor.executemany("UPDATE documents SET size = ?, mtime_ns = ?, content_hash = NULL WHERE root_id = ? AND rel_path = ?", to_update)
-            # Setting content_hash = NULL triggers background re-hashing
+            # We increment observed_revision, set hash_state to pending, and RETAIN verified_content_hash.
+            cursor.executemany("UPDATE documents SET size = ?, mtime_ns = ?, observed_revision = observed_revision + 1, hash_state = 'pending' WHERE root_id = ? AND rel_path = ?", to_update)
         if to_delete_ids:
             cursor.executemany("DELETE FROM documents WHERE id = ?", to_delete_ids)
             

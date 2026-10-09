@@ -306,16 +306,40 @@ def scan_object(raw_path: str) -> dict:
         raise NotADirectoryError(f"Это не папка: {root}")
 
     import app.backend.db as db
+    import threading
 
     object_id = object_id_for_path(root)
     previous = load_manifest(object_id)
     previous_tree = (previous or {}).get("tree")
 
-    # Sync disk to SQLite
-    root_id = db.sync_root_to_db(root)
-    
-    # Build tree from SQLite
-    tree, extension_counts, folder_count, file_count = db.build_tree_from_db(root, root_id)
+    # Fast Path: Get ID and return immediately if exists
+    conn = db.get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO roots (path, is_active) VALUES (?, 1)", (str(root.resolve()),))
+        cursor.execute("SELECT id FROM roots WHERE path = ?", (str(root.resolve()),))
+        root_id = cursor.fetchone()[0]
+        conn.commit()
+        
+        # Build tree instantly from current DB state
+        tree, extension_counts, folder_count, file_count = db.build_tree_from_db(root, root_id)
+    finally:
+        conn.close()
+
+    if file_count == 0:
+        # First time opening or DB was wiped. Block and sync!
+        db.sync_root_to_db(root)
+        tree, extension_counts, folder_count, file_count = db.build_tree_from_db(root, root_id)
+    else:
+        # Async Path: Trigger disk sync in background
+        def async_sync():
+            try:
+                db.sync_root_to_db(root)
+                # In a real app, emit a WebSocket event here so the UI knows to refresh!
+            except Exception as e:
+                print(f"Background sync error: {e}")
+        
+        threading.Thread(target=async_sync, daemon=True).start()
     
     last_diff = diff_trees(previous_tree, tree)
     manifest = {
