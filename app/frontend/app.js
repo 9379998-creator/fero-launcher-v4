@@ -3461,13 +3461,12 @@ function showPdfPage(page, options = {}) {
 }
 
 function clampPan() {
-  // Ровные границы перетаскивания: лист можно увести за любой край,
-  // но гарантируется доступность всех 4 краёв при увеличении,
-  // а при уменьшении лист не улетает за пределы видимости.
   const view = state.view;
-  if (els.pdfPageImage.hidden) return;
-  const naturalWidth = els.pdfPageImage.naturalWidth;
-  const naturalHeight = els.pdfPageImage.naturalHeight;
+  const canvas = document.getElementById("pdfPageCanvas");
+  const isCanvasActive = canvas && !canvas.hidden;
+  if (els.pdfPageImage.hidden && !isCanvasActive) return;
+  const naturalWidth = isCanvasActive ? (canvas.width / (window.devicePixelRatio || 1)) : els.pdfPageImage.naturalWidth;
+  const naturalHeight = isCanvasActive ? (canvas.height / (window.devicePixelRatio || 1)) : els.pdfPageImage.naturalHeight;
   if (!naturalWidth || !naturalHeight) return;
   const stage = els.pdfStage.getBoundingClientRect();
   if (!stage.width || !stage.height) return;
@@ -3513,7 +3512,18 @@ function fitPdfPage() {
   
   const canvas = document.getElementById("pdfPageCanvas");
   const isCanvasActive = canvas && !canvas.hidden;
-  const contentWidth = isCanvasActive ? canvas.width : els.pdfPageImage.naturalWidth;
+  const contentWidth = isCanvasActive ? (canvas.width / (window.devicePixelRatio || 1)) : els.pdfPageImage.naturalWidth;
+  const contentHeight = isCanvasActive ? (canvas.height / (window.devicePixelRatio || 1)) : els.pdfPageImage.naturalHeight;
+  
+  if (!contentWidth || !contentHeight) {
+    state.view.scale = 1;
+    state.view.fitScale = 1;
+    state.view.panX = 0;
+    state.view.panY = 0;
+    updateViewTransform();
+    return;
+  }
+  
   const contentHeight = isCanvasActive ? canvas.height : els.pdfPageImage.naturalHeight;
   
   if (!contentWidth || !contentHeight) return;
