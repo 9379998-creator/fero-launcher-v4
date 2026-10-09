@@ -4831,7 +4831,9 @@ if (els.scaleWidget) {
 // Масштабирование только картинки на сцене (в полноэкранном 3-м режиме)
 els.pdfStage.addEventListener("wheel", (event) => {
   if (event.target.closest(".viewer-controls")) return;
-  if (!event.ctrlKey || (els.pdfPageImage.hidden && !state.excelWorkbook)) return;
+  const canvas = document.getElementById("pdfPageCanvas");
+  const isCanvasActive = canvas && !canvas.hidden;
+  if (!event.ctrlKey || (els.pdfPageImage.hidden && !isCanvasActive && !state.excelWorkbook)) return;
   event.preventDefault();
   event.stopPropagation();
   zoomPdf(event.deltaY < 0 ? 1.12 : 0.89, event.clientX, event.clientY);
