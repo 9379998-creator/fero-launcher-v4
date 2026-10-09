@@ -3524,9 +3524,7 @@ function fitPdfPage() {
     return;
   }
   
-  const contentHeight = isCanvasActive ? canvas.height : els.pdfPageImage.naturalHeight;
   
-  if (!contentWidth || !contentHeight) return;
   const stage = els.pdfStage.getBoundingClientRect();
   // Сцена ещё не разложена (нулевые размеры): не портим масштаб крошечным
   // вписыванием, дождёмся следующего кадра.
