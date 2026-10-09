@@ -3285,6 +3285,9 @@ async function renderPdfJsPage(pageObj) {
     let targetScale = (state.view.scale || 1.0) * dpr;
     if (targetScale < 1.5) targetScale = 1.5; // Baseline quality
     
+    const baseViewport = page.getViewport({ scale: 1.0 });
+    canvas.dataset.naturalWidth = baseViewport.width;
+    canvas.dataset.naturalHeight = baseViewport.height;
     let viewport = page.getViewport({ scale: targetScale });
     
     // Max safe limits (16M pixels area or 8000px side)
@@ -3304,8 +3307,8 @@ async function renderPdfJsPage(pageObj) {
     
     canvas.width = viewport.width;
     canvas.height = viewport.height;
-    canvas.style.width = (viewport.width / dpr) + "px";
-    canvas.style.height = (viewport.height / dpr) + "px";
+    canvas.style.width = baseViewport.width + "px";
+    canvas.style.height = baseViewport.height + "px";
     
     const renderContext = {
       canvasContext: canvas.getContext("2d"),
@@ -3467,8 +3470,8 @@ function clampPan() {
   const canvas = document.getElementById("pdfPageCanvas");
   const isCanvasActive = canvas && !canvas.hidden;
   if (els.pdfPageImage.hidden && !isCanvasActive) return;
-  const naturalWidth = isCanvasActive ? (canvas.width / (window.devicePixelRatio || 1)) : els.pdfPageImage.naturalWidth;
-  const naturalHeight = isCanvasActive ? (canvas.height / (window.devicePixelRatio || 1)) : els.pdfPageImage.naturalHeight;
+  const naturalWidth = isCanvasActive ? Number(canvas.dataset.naturalWidth || 1000) : els.pdfPageImage.naturalWidth;
+  const naturalHeight = isCanvasActive ? Number(canvas.dataset.naturalHeight || 1000) : els.pdfPageImage.naturalHeight;
   if (!naturalWidth || !naturalHeight) return;
   const stage = els.pdfStage.getBoundingClientRect();
   if (!stage.width || !stage.height) return;
@@ -3514,8 +3517,8 @@ function fitPdfPage() {
   
   const canvas = document.getElementById("pdfPageCanvas");
   const isCanvasActive = canvas && !canvas.hidden;
-  const contentWidth = isCanvasActive ? (canvas.width / (window.devicePixelRatio || 1)) : els.pdfPageImage.naturalWidth;
-  const contentHeight = isCanvasActive ? (canvas.height / (window.devicePixelRatio || 1)) : els.pdfPageImage.naturalHeight;
+  const contentWidth = isCanvasActive ? Number(canvas.dataset.naturalWidth || 1000) : els.pdfPageImage.naturalWidth;
+  const contentHeight = isCanvasActive ? Number(canvas.dataset.naturalHeight || 1000) : els.pdfPageImage.naturalHeight;
   
   if (!contentWidth || !contentHeight) {
     state.view.scale = 1;
