@@ -1204,7 +1204,7 @@ textarea:focus {
   user-select: none;
 }
 
-.pdf-stage img {
+.pdf-stage img, .pdf-stage canvas {
   display: block;
   position: absolute;
   left: 50%;
@@ -1219,7 +1219,7 @@ textarea:focus {
   user-select: none;
 }
 
-.pdf-stage img[hidden] {
+.pdf-stage img[hidden], .pdf-stage canvas[hidden] {
   display: none !important;
 }
 
