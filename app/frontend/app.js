@@ -1664,10 +1664,10 @@ function getFileIconSvg(ext = "") {
   if (e === "DWG" || e === "DXF") {
     return `<svg viewBox="0 0 16 16" width="15" height="15" fill="#2563eb"><path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3 14.5v-13zm6.5.5v3h3l-3-3z"/><text x="3" y="12" font-size="4.5" font-weight="bold" fill="#ffffff" font-family="Segoe UI, sans-serif">DWG</text></svg>`;
   }
-  if (e === "XLSX" || e === "XLS" || e === "CSV") {
+  if (e === "XLSX" || e === "XLS" || e === "CSV" || e === "GSHEET") {
     return `<svg viewBox="0 0 16 16" width="15" height="15" fill="#16a34a"><path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3 14.5v-13zm6.5.5v3h3l-3-3z"/><text x="3.8" y="12" font-size="5" font-weight="bold" fill="#ffffff" font-family="Segoe UI, sans-serif">XLS</text></svg>`;
   }
-  if (e === "DOCX" || e === "DOC") {
+  if (e === "DOCX" || e === "DOC" || e === "GDOC") {
     return `<svg viewBox="0 0 16 16" width="15" height="15" fill="#1d4ed8"><path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3 14.5v-13zm6.5.5v3h3l-3-3z"/><text x="3.2" y="12" font-size="4.5" font-weight="bold" fill="#ffffff" font-family="Segoe UI, sans-serif">DOC</text></svg>`;
   }
   return `<svg viewBox="0 0 16 16" width="15" height="15" fill="#94a3b8"><path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3 14.5v-13zm6.5.5v3h3l-3-3z"/></svg>`;

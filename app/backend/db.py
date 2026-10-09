@@ -156,7 +156,7 @@ def sync_root_to_db(root: Path):
                         "mtime_ns": stat.st_mtime_ns
                     }
                 except OSError:
-                    pass
+                    disk_files[rel_path] = {"name": file, "ext": file_path.suffix.lstrip(".").upper(), "size": 0, "mtime_ns": 0}
         
         # Fetch existing DB files
         cursor.execute("SELECT id, rel_path, size, mtime_ns FROM documents WHERE root_id = ?", (root_id,))
