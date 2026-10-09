@@ -36,6 +36,8 @@ const state = {
   wordDocs: [],
   wordDocIndex: 0,
   wordScale: 1,
+  currentToc: null,
+  activeTocPath: "",
   highQualityPages: new Map(),
   pdfPairIndex: new Map(),
   pairless: false,
@@ -113,6 +115,12 @@ const els = {
   viewFit: document.getElementById("viewFit"),
   viewRotate: document.getElementById("viewRotate"),
   viewOpenNative: document.getElementById("viewOpenNative"),
+  viewToggleToc: document.getElementById("viewToggleToc"),
+  viewCopyLink: document.getElementById("viewCopyLink"),
+  pdfTocDrawer: document.getElementById("pdfTocDrawer"),
+  pdfTocSearch: document.getElementById("pdfTocSearch"),
+  pdfTocClose: document.getElementById("pdfTocClose"),
+  pdfTocList: document.getElementById("pdfTocList"),
   contextMenu: document.getElementById("contextMenu"),
   scaleWidget: document.getElementById("scaleWidget"),
   scaleResetBtn: document.getElementById("scaleResetBtn"),
@@ -3331,6 +3339,7 @@ function showPdfPage(page, options = {}) {
   if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) applyPageView();
   requestHighQualityPage(page);
   updatePagePosition(page);
+  checkAndShowPdfToc(targetDocPath, page.page);
 }
 
 function clampPan() {
@@ -4358,8 +4367,219 @@ if (els.viewRotate) {
   });
 }
 
+// =========================================================================
+// Навигация по оглавлению (TOC) и Deep Linking для больших каталогов и PDF
+// =========================================================================
 
+const _tocCache = new Map();
 
+async function checkAndShowPdfToc(docPath, currentPageNum) {
+  if (!els.viewToggleToc || !docPath || !docPath.toLowerCase().endsWith(".pdf")) {
+    if (els.viewToggleToc) els.viewToggleToc.hidden = true;
+    if (els.pdfTocDrawer) els.pdfTocDrawer.hidden = true;
+    state.currentToc = null;
+    state.activeTocPath = "";
+    return;
+  }
+
+  // Если уже загружено оглавление для текущего файла
+  if (state.activeTocPath === docPath && state.currentToc) {
+    els.viewToggleToc.hidden = false;
+    highlightActiveTocItem(currentPageNum);
+    return;
+  }
+
+  let data = _tocCache.get(docPath);
+  if (!data) {
+    try {
+      const resp = await fetch("/api/pdf/toc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file: docPath })
+      });
+      if (resp.ok) {
+        data = await resp.json();
+        _tocCache.set(docPath, data);
+      }
+    } catch (_) {}
+  }
+
+  if (data && data.count > 0) {
+    state.currentToc = data.toc;
+    state.activeTocPath = docPath;
+    els.viewToggleToc.hidden = false;
+    renderPdfTocList(data.toc);
+    highlightActiveTocItem(currentPageNum);
+  } else {
+    state.currentToc = null;
+    state.activeTocPath = "";
+    els.viewToggleToc.hidden = true;
+    if (els.pdfTocDrawer) els.pdfTocDrawer.hidden = true;
+  }
+}
+
+function renderPdfTocList(items, filterQuery = "") {
+  if (!els.pdfTocList) return;
+  els.pdfTocList.replaceChildren();
+  const query = filterQuery.trim().toLowerCase();
+
+  const filtered = query
+    ? items.filter((it) => it.title.toLowerCase().includes(query) || String(it.page).includes(query))
+    : items;
+
+  if (!filtered.length) {
+    const empty = document.createElement("div");
+    empty.style.padding = "10px";
+    empty.style.color = "#94a3b8";
+    empty.style.fontSize = "11px";
+    empty.textContent = "Разделы не найдены";
+    els.pdfTocList.append(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  // Показываем первые 400 элементов для плавности рендеринга DOM
+  const slice = filtered.slice(0, 400);
+
+  slice.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "pdf-toc-item";
+    row.dataset.page = item.page;
+    row.style.paddingLeft = `${Math.max(8, (item.level || 1) * 12)}px`;
+
+    const titleEl = document.createElement("span");
+    titleEl.className = "pdf-toc-item-title";
+    titleEl.textContent = item.title;
+    titleEl.title = `${item.title} (стр. ${item.page})`;
+
+    const pageEl = document.createElement("span");
+    pageEl.className = "pdf-toc-item-page";
+    pageEl.textContent = `стр. ${item.page}`;
+
+    row.append(titleEl, pageEl);
+
+    row.addEventListener("click", () => {
+      jumpToPdfPage(item.page, item.title);
+    });
+
+    fragment.append(row);
+  });
+
+  els.pdfTocList.append(fragment);
+}
+
+function highlightActiveTocItem(pageNum) {
+  if (!els.pdfTocList || !pageNum) return;
+  const num = Number(pageNum);
+  let activeEl = null;
+  [...els.pdfTocList.querySelectorAll(".pdf-toc-item")].forEach((el) => {
+    const p = Number(el.dataset.page);
+    const isAct = p === num;
+    el.classList.toggle("active", isAct);
+    if (isAct) activeEl = el;
+  });
+  if (activeEl) {
+    activeEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
+
+async function jumpToPdfPage(targetPage, sectionTitle = "") {
+  const num = Number(targetPage);
+  if (!num || !state.activeTocPath) return;
+
+  // Ищем страницу в уже загруженных
+  const existing = state.renderedPages.find(
+    (p) => (p.documentPath === state.activeTocPath || thumbPathForPage(p) === state.activeTocPath) && Number(p.page) === num
+  );
+
+  if (existing) {
+    showPdfPage(existing);
+    return;
+  }
+
+  // Если страницы ещё нет в ленте — запрашиваем её на лету
+  startProgress("Переход к разделу", `Страница ${num}: ${sectionTitle || ""}`);
+  try {
+    const resp = await fetch("/api/pdf/page", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: state.activeTocPath, page: num, dpi: PDF_PREVIEW_DPI })
+    });
+    const payload = await resp.json();
+    if (!resp.ok) throw new Error(payload.error || "Не удалось загрузить страницу");
+
+    const newPage = {
+      ...payload.item,
+      name: `${payload.name} · стр. ${num}`,
+      documentPath: payload.path,
+      dpi: payload.dpi,
+      cacheHit: payload.cacheHit,
+      totalPages: payload.pages
+    };
+
+    await appendPagesToViewer([newPage], null, state.renderEpoch);
+    showPdfPage(newPage);
+    finishProgress();
+  } catch (err) {
+    showOperationError(err);
+  }
+}
+
+if (els.viewToggleToc) {
+  els.viewToggleToc.addEventListener("click", () => {
+    if (!els.pdfTocDrawer) return;
+    const isHidden = els.pdfTocDrawer.hidden;
+    els.pdfTocDrawer.hidden = !isHidden;
+    if (isHidden && els.pdfTocSearch) {
+      els.pdfTocSearch.focus();
+    }
+  });
+}
+
+if (els.pdfTocClose) {
+  els.pdfTocClose.addEventListener("click", () => {
+    if (els.pdfTocDrawer) els.pdfTocDrawer.hidden = true;
+  });
+}
+
+if (els.pdfTocSearch) {
+  els.pdfTocSearch.addEventListener("input", (e) => {
+    if (state.currentToc) {
+      renderPdfTocList(state.currentToc, e.target.value);
+    }
+  });
+}
+
+// Кнопка «Копировать ссылку на страницу и узел» (Deep Link для тендерных ведомостей)
+if (els.viewCopyLink) {
+  els.viewCopyLink.addEventListener("click", () => {
+    const page = (state.renderedPages || []).find((p) => {
+      try { return pageKey(p) === state.activePageKey; } catch (_) { return false; }
+    });
+    const filePath = thumbPathForPage(page) || state.activeNativePath;
+    const pageNum = page?.page || 1;
+    const fileName = filePath ? filePath.split(/[\/\\]/).pop() : "document.pdf";
+
+    // Поиск ближайшего раздела из TOC
+    let sectionName = "";
+    if (state.currentToc && state.currentToc.length) {
+      const match = state.currentToc
+        .filter((item) => item.page <= pageNum)
+        .sort((a, b) => b.page - a.page)[0];
+      if (match) sectionName = match.title;
+    }
+
+    // Формат ссылки для вставки в Excel / Word / чат
+    const sectionPart = sectionName ? ` · Раздел: «${sectionName}»` : "";
+    const linkText = `${fileName}#стр.${pageNum}${sectionPart} [${filePath}]`;
+
+    navigator.clipboard?.writeText(linkText).then(() => {
+      showToast(`Ссылка скопирована: Стр. ${pageNum}${sectionPart}`);
+    }).catch(() => {
+      prompt("Скопируйте ссылку:", linkText);
+    });
+  });
+}
 
 // Блокируем масштабирование всего окна браузера (Ctrl + / Ctrl - / Ctrl + wheel в пустых местах),
 // чтобы каркас окон, рамки и разметка никогда не «плыли»

@@ -1408,6 +1408,114 @@ textarea:focus {
   display: none !important;
 }
 
+/* Выдвижная панель оглавления и разделов каталога */
+.pdf-toc-drawer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 320px;
+  max-width: 85%;
+  background: #ffffff;
+  border-right: 1px solid #c9d2de;
+  box-shadow: 2px 0 12px rgba(0, 0, 0, 0.12);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+}
+
+.pdf-toc-drawer[hidden] {
+  display: none !important;
+}
+
+.pdf-toc-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: #f1f4f8;
+  border-bottom: 1px solid #d4d7dc;
+}
+
+.pdf-toc-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: #1e293b;
+  flex: 1 1 auto;
+}
+
+.pdf-toc-close {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  color: #64748b;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.pdf-toc-close:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.pdf-toc-search {
+  width: 100%;
+  height: 24px;
+  margin-top: 4px;
+  padding: 2px 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 2px;
+  font-size: 11px;
+}
+
+.pdf-toc-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 0;
+}
+
+.pdf-toc-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #334155;
+  cursor: pointer;
+  border-bottom: 1px solid #f1f5f9;
+  text-align: left;
+}
+
+.pdf-toc-item:hover {
+  background: #f0f7ff;
+  color: #005499;
+}
+
+.pdf-toc-item.active {
+  background: #e0f2fe;
+  color: #0369a1;
+  font-weight: 600;
+}
+
+.pdf-toc-item-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdf-toc-item-page {
+  font-size: 10px;
+  color: #94a3b8;
+  flex: 0 0 auto;
+}
+
 .quality-badge {
   position: absolute;
   top: 9px;

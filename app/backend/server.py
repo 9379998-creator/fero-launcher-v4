@@ -2641,7 +2641,10 @@ def render_pdf(
         rendered_count = 0
         cache_hit_count = 0
 
-        pages_to_render = 1 if first_page_only else page_count
+        # Для каталогов и больших PDF (> 50 страниц) не рендерим сотни страниц в память/диск за один запрос:
+        # первично отдаём окно первых 20 страниц, остальные подгружаются лениво по номерам страниц (/api/pdf/page)
+        MAX_INITIAL_PAGES = 20
+        pages_to_render = 1 if first_page_only else min(page_count, MAX_INITIAL_PAGES if page_count > 50 else page_count)
         for page_idx in range(pages_to_render):
             page_num = page_idx + 1
             png = target_dir / f"page-{page_num}.png"
@@ -2876,7 +2879,38 @@ def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI, page_time
     }
 
 
+def get_pdf_toc(path: Path) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"PDF не найден: {path}")
+    if not path.is_file() or path.suffix.casefold() != ".pdf":
+        raise ValueError(f"Это не PDF-файл: {path}")
 
+    _FITZ_RENDER_LOCK.acquire()
+    try:
+        import fitz
+        try:
+            doc = fitz.open(str(path))
+        except Exception:
+            doc = fitz.open(stream=path.read_bytes(), filetype="pdf")
+        toc = doc.get_toc()
+        page_count = len(doc)
+        doc.close()
+        items = []
+        for level, title, page in toc:
+            items.append({
+                "level": level,
+                "title": title.strip(),
+                "page": max(1, min(page, page_count))
+            })
+        return {
+            "name": path.name,
+            "path": str(path),
+            "totalPages": page_count,
+            "count": len(items),
+            "toc": items
+        }
+    finally:
+        _FITZ_RENDER_LOCK.release()
 
 
 class LauncherHandler(BaseHTTPRequestHandler):
@@ -3365,6 +3399,18 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 payload_page = render_pdf_page(Path(raw_file), page=page, dpi=dpi)
                 self.send_json(HTTPStatus.OK, payload_page)
             except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/pdf/toc":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                if not raw_file:
+                    raise ValueError("Не выбран PDF-файл для извлечения оглавления")
+                toc_data = get_pdf_toc(Path(raw_file))
+                self.send_json(HTTPStatus.OK, toc_data)
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, json.JSONDecodeError) as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 

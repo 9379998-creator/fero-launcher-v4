@@ -157,6 +157,16 @@
             <button id="viewZoomIn" type="button" title="Увеличить">+</button>
             <button id="viewFit" type="button" title="Вписать страницу">Вписать</button>
             <button id="viewRotate" type="button" title="Повернуть на 90°">⟳</button>
+            <button id="viewToggleToc" type="button" title="Оглавление и разделы каталога" hidden>📑 Разделы</button>
+            <button id="viewCopyLink" type="button" title="Копировать ссылку на страницу и узел">🔗 Ссылка</button>
+          </div>
+          <div class="pdf-toc-drawer" id="pdfTocDrawer" hidden>
+            <div class="pdf-toc-header">
+              <span class="pdf-toc-title">Разделы каталога</span>
+              <input class="pdf-toc-search" id="pdfTocSearch" type="search" placeholder="Поиск раздела, профиля…" spellcheck="false">
+              <button class="pdf-toc-close" id="pdfTocClose" type="button" title="Закрыть (Escape)">✕</button>
+            </div>
+            <div class="pdf-toc-list" id="pdfTocList"></div>
           </div>
         </div>
       </div>
