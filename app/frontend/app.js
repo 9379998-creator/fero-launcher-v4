@@ -4930,7 +4930,9 @@ let pdfDragMoved = false;
 
 els.pdfStage.addEventListener("pointerdown", (event) => {
   if (event.target.closest(".viewer-controls")) return;
-  if (els.pdfPageImage.hidden || event.button !== 0) return;
+  const canvas = document.getElementById("pdfPageCanvas");
+  const isCanvasActive = canvas && !canvas.hidden;
+  if ((els.pdfPageImage.hidden && !isCanvasActive) || event.button !== 0) return;
   event.preventDefault();
   state.view.dragging = true;
   pdfDragMoved = false;
