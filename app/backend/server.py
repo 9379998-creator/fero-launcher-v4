@@ -3100,7 +3100,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "status": "ok",
-                    "service": "F-Engineering Launcher v3",
+                    "service": "F.E.R.O. Launcher v4",
                     "version": VERSION,
                     "repoRoot": str(REPO_ROOT),
                     "runtime": str(RUNTIME_DIR),
