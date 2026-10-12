@@ -4632,8 +4632,8 @@ function renderPdfTocList(items, filterQuery = "") {
   }
 
   const fragment = document.createDocumentFragment();
-  // Показываем первые 400 элементов для плавности рендеринга DOM
-  const slice = filtered.slice(0, 400);
+  // Показываем первые 800 элементов для плавности рендеринга DOM
+  const slice = filtered.slice(0, 800);
 
   slice.forEach((item) => {
     const row = document.createElement("div");
@@ -4721,6 +4721,21 @@ async function jumpToPdfPage(targetPage, sectionTitle = "") {
     const thumb = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(pageKey(existing))}"]`);
     if (thumb) {
       thumb.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+    if (!existing.bytes) {
+      fetch("/api/pdf/page", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file: state.activeTocPath, page: num, dpi: PDF_PREVIEW_DPI })
+      }).then(r => r.json()).then(payload => {
+        if (payload?.item?.url) {
+          existing.url = payload.item.url;
+          existing.bytes = payload.item.bytes;
+          if (state.activePageKey === pageKey(existing)) {
+            els.pdfPageImage.src = payload.item.url;
+          }
+        }
+      }).catch(() => {});
     }
     return;
   }
@@ -4846,6 +4861,10 @@ if (pdfCanvas) {
 if (els.pdfTocDrawer) {
   els.pdfTocDrawer.addEventListener("dblclick", (e) => e.stopPropagation());
   els.pdfTocDrawer.addEventListener("click", (e) => e.stopPropagation());
+  els.pdfTocDrawer.addEventListener("pointerdown", (e) => e.stopPropagation());
+  els.pdfTocDrawer.addEventListener("mousedown", (e) => e.stopPropagation());
+  els.pdfTocDrawer.addEventListener("pointerup", (e) => e.stopPropagation());
+  els.pdfTocDrawer.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
 }
 
 if (els.pdfStage) {
@@ -4936,7 +4955,7 @@ if (els.scaleWidget) {
 
 // Масштабирование только картинки на сцене (в полноэкранном 3-м режиме)
 els.pdfStage.addEventListener("wheel", (event) => {
-  if (event.target.closest(".viewer-controls")) return;
+  if (event.target.closest(".viewer-controls, .pdf-toc-drawer, .excel-tabs-bar")) return;
   const canvas = document.getElementById("pdfPageCanvas");
   const isCanvasActive = canvas && !canvas.hidden;
   if (!event.ctrlKey || (els.pdfPageImage.hidden && !isCanvasActive && !state.excelWorkbook)) return;
@@ -5032,7 +5051,7 @@ try {
 let pdfDragMoved = false;
 
 els.pdfStage.addEventListener("pointerdown", (event) => {
-  if (event.target.closest(".viewer-controls")) return;
+  if (event.target.closest(".viewer-controls, .pdf-toc-drawer, .excel-tabs-bar, input, button")) return;
   const canvas = document.getElementById("pdfPageCanvas");
   const isCanvasActive = canvas && !canvas.hidden;
   if ((els.pdfPageImage.hidden && !isCanvasActive) || event.button !== 0) return;
