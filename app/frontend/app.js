@@ -117,9 +117,6 @@ const els = {
   viewOpenNative: document.getElementById("viewOpenNative"),
   viewPrevPage: document.getElementById("viewPrevPage"),
   viewNextPage: document.getElementById("viewNextPage"),
-  viewExitFull: document.getElementById("viewExitFull"),
-  stagePrevBtn: document.getElementById("stagePrevBtn"),
-  stageNextBtn: document.getElementById("stageNextBtn"),
   viewToggleToc: document.getElementById("viewToggleToc"),
   viewCopyLink: document.getElementById("viewCopyLink"),
   pdfTocDrawer: document.getElementById("pdfTocDrawer"),
@@ -3448,7 +3445,7 @@ function showPdfPage(page, options = {}) {
   const displayPage = highPage || page;
   const targetDocPath = page.previewFor?.path || page.sourcePath || page.documentPath || "";
   setActiveNativePath(targetDocPath);
-  revealPathInTree(targetDocPath, { skipScroll: skipTreeScroll });
+  revealPathInTree(targetDocPath, { updateSelection: true, skipScroll: skipTreeScroll });
   state.activePageUrl = displayPage.url;
   els.pdfPageImage.src = displayPage.url;
   els.pdfPageImage.hidden = false;
@@ -3469,8 +3466,8 @@ function showPdfPage(page, options = {}) {
   
   updatePagePosition(page);
   const hasMultiplePages = (state.renderedPages?.length || 0) > 1 || (Number(page.totalPages) || 0) > 1;
-  if (els.stagePrevBtn) els.stagePrevBtn.hidden = !(state.viewMode === "full" && hasMultiplePages);
-  if (els.stageNextBtn) els.stageNextBtn.hidden = !(state.viewMode === "full" && hasMultiplePages);
+  if (els.viewPrevPage) els.viewPrevPage.hidden = !hasMultiplePages;
+  if (els.viewNextPage) els.viewNextPage.hidden = !hasMultiplePages;
   checkAndShowPdfToc(targetDocPath, page.page);
 }
 
@@ -3663,23 +3660,33 @@ function setViewerMode(mode) {
     }
   }
   const hasMultiplePages = (state.renderedPages?.length || 0) > 1 || (Number(state.renderedPages?.[0]?.totalPages) || 0) > 1;
-  if (els.stagePrevBtn) els.stagePrevBtn.hidden = !(mode === "full" && hasMultiplePages);
-  if (els.stageNextBtn) els.stageNextBtn.hidden = !(mode === "full" && hasMultiplePages);
+  if (els.viewPrevPage) els.viewPrevPage.hidden = !hasMultiplePages;
+  if (els.viewNextPage) els.viewNextPage.hidden = !hasMultiplePages;
 
-  if (state.revealedPath) revealPathInTree(state.revealedPath);
-  // Возврат из полноэкранного (Окно 3 -> Окно 2): лента гарантированно прокручивается к текущему листу
-  if (wasFull && mode !== "full" && state.activePageKey) {
-    updateActivePdfThumb();
-    requestAnimationFrame(() => {
+  // Возврат из полноэкранного (Окно 3 -> Окно 2 -> Окно 1):
+  // 1. В Окне 1 (дереве) гарантированно подсвечивается и выбирается этот файл!
+  // 2. В Окне 2 (ленте) гарантированно центрируется и подсвечивается миниатюра текущего листа!
+  if (wasFull && mode !== "full") {
+    const activePage = state.renderedPages?.find((p) => pageKey(p) === state.activePageKey) || state.renderedPages?.[0];
+    const docPath = (activePage && (thumbPathForPage(activePage) || activePage.documentPath || activePage.sourcePath)) || state.revealedPath || "";
+    if (docPath) {
+      revealPathInTree(docPath, { updateSelection: true, skipScroll: false });
+    }
+    if (state.activePageKey) {
+      updateActivePdfThumb();
       requestAnimationFrame(() => {
-        try {
-          const thumbEl = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(state.activePageKey)}"]`);
-          if (thumbEl) {
-            thumbEl.scrollIntoView({ behavior: "smooth", block: "center" });
-          }
-        } catch (e) {}
+        requestAnimationFrame(() => {
+          try {
+            const thumbEl = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(state.activePageKey)}"]`);
+            if (thumbEl) {
+              thumbEl.scrollIntoView({ behavior: "smooth", block: "center" });
+            }
+          } catch (e) {}
+        });
       });
-    });
+    }
+  } else if (state.revealedPath) {
+    revealPathInTree(state.revealedPath);
   }
   requestAnimationFrame(() => requestAnimationFrame(() => {
     fitPdfPage();
@@ -4501,24 +4508,7 @@ if (els.viewNextPage) {
     stepThumbnails(1);
   });
 }
-if (els.viewExitFull) {
-  els.viewExitFull.addEventListener("click", (e) => {
-    e.stopPropagation();
-    setViewerMode("standard");
-  });
-}
-if (els.stagePrevBtn) {
-  els.stagePrevBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    stepThumbnails(-1);
-  });
-}
-if (els.stageNextBtn) {
-  els.stageNextBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    stepThumbnails(1);
-  });
-}
+
 // «Вписать» возвращает всё в нормальное состояние: масштаб картинки,
 // сдвиг и поворот. Панель при этом никуда не уезжает.
 if (els.viewOpenNative) {
@@ -4694,6 +4684,11 @@ function highlightActiveTocItem(pageNum) {
     }
   }
 
+  // Если номер страницы меньше стартовой страницы первого раздела каталога (например, обложка/титул):
+  if (!bestItem && items.length) {
+    bestItem = items[0];
+  }
+
   items.forEach((el) => {
     el.classList.toggle("active", el === bestItem);
   });
@@ -4710,14 +4705,19 @@ async function jumpToPdfPage(targetPage, sectionTitle = "") {
 
   // Ищем страницу в уже загруженных
   const existing = state.renderedPages.find((p) => {
-    const pDoc = (p.documentPath || thumbPathForPage(p) || p.sourcePath || "").replace(/\//g, "\\").toLowerCase();
-    return pDoc === normToc && Number(p.page) === num;
+    const p1 = (p.documentPath || "").replace(/\//g, "\\").toLowerCase();
+    const p2 = (p.sourcePath || "").replace(/\//g, "\\").toLowerCase();
+    const p3 = (thumbPathForPage(p) || "").replace(/\//g, "\\").toLowerCase();
+    const matchesDoc = p1 === normToc || p2 === normToc || p3 === normToc ||
+      (normToc.length > 5 && (p1.endsWith(normToc) || normToc.endsWith(p1) || p2.endsWith(normToc) || normToc.endsWith(p2)));
+    return matchesDoc && Number(p.page) === num;
   });
 
   if (existing) {
     state.view.userZoomed = false;
     showPdfPage(existing);
     highlightActiveTocItem(num);
+    revealPathInTree(state.activeTocPath, { updateSelection: true, skipScroll: true });
     const thumb = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(pageKey(existing))}"]`);
     if (thumb) {
       thumb.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -4739,7 +4739,9 @@ async function jumpToPdfPage(targetPage, sectionTitle = "") {
     const newPage = {
       ...payload.item,
       name: `${payload.name} · стр. ${num}`,
-      documentPath: payload.path,
+      documentPath: state.activeTocPath,
+      sourcePath: state.activeTocPath,
+      page: num,
       dpi: payload.dpi,
       cacheHit: payload.cacheHit,
       totalPages: payload.pages
@@ -4749,6 +4751,7 @@ async function jumpToPdfPage(targetPage, sectionTitle = "") {
     state.view.userZoomed = false;
     showPdfPage(newPage);
     highlightActiveTocItem(num);
+    revealPathInTree(state.activeTocPath, { updateSelection: true, skipScroll: true });
     finishProgress();
   } catch (err) {
     showOperationError(err);
