@@ -3707,7 +3707,7 @@ const PDF_FETCH_TIMEOUT_MS = 300000;
 // 15 секунд молотили /api/objects/diff каждые 15 с (живое облако H:, полный
 // скан на каждое изменение) и могли перезагружать дерево под руками. 10 минут.
 const DIFF_POLL_INTERVAL_MS = 600000;
-const PDF_PREVIEW_DPI = 150;
+const PDF_PREVIEW_DPI = 72;
 const PDF_QUALITY_DPI = 300;
 
 function formatBytes(bytes) {

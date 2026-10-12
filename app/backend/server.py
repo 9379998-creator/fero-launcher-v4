@@ -99,7 +99,7 @@ def get_launcher_version_info() -> dict:
     except Exception:
         pass
     return {"version": APP_VERSION, "branch": APP_BRANCH}
-DEFAULT_PDF_DPI = 300
+DEFAULT_PDF_DPI = 72
 # Архитектурный стандарт (docs/CORE_ARCH_RULES.md): нарезка страниц чертежей
 # и превью — строго 150 DPI PNG. 300 DPI и WebP в дефолтном тракте запрещены
 # (нагрузка CPU/память без выигрыша читаемости на экране).
@@ -481,25 +481,76 @@ def is_excel_file(path: Path) -> bool:
     return path.suffix.casefold() in {".xls", ".xlsx", ".xlsm"}
 
 
+_FITZ_RENDER_LOCK = threading.Lock()
+_OPEN_FITZ_DOCS: dict[str, tuple[any, float]] = {}
+_FITZ_CACHE_LOCK = threading.Lock()
+_MANIFEST_CACHE: dict[str, dict] = {}
+_MANIFEST_LOCK = threading.Lock()
+
+
+def get_fitz_doc(path: Path):
+    with _FITZ_CACHE_LOCK:
+        p_str = str(path.resolve())
+        now = time.time()
+        # Освобождаем документы, к которым не обращались более 120 секунд
+        for k, (d, ts) in list(_OPEN_FITZ_DOCS.items()):
+            if now - ts > 120:
+                try:
+                    d.close()
+                except Exception:
+                    pass
+                _OPEN_FITZ_DOCS.pop(k, None)
+        if p_str in _OPEN_FITZ_DOCS:
+            doc, _ = _OPEN_FITZ_DOCS[p_str]
+            _OPEN_FITZ_DOCS[p_str] = (doc, now)
+            return doc
+        import fitz
+        try:
+            doc = fitz.open(p_str)
+        except Exception:
+            doc = fitz.open(stream=path.read_bytes(), filetype="pdf")
+        _OPEN_FITZ_DOCS[p_str] = (doc, now)
+        return doc
+
+
 def pdf_page_item(path: Path, key: str, page: int, png: Path) -> dict:
     return {
         "page": page,
         "name": f"{path.name} · стр. {page}",
         "url": f"/cache/pdf/{key}/{png.name}",
-        "bytes": png.stat().st_size,
+        "bytes": png.stat().st_size if png.exists() else 0,
     }
 
 
 def read_pdf_cache_manifest(path: Path, dpi: int, key: str, target_dir: Path) -> dict | None:
+    with _MANIFEST_LOCK:
+        cached = _MANIFEST_CACHE.get(key)
+        if cached:
+            return cached
+
     manifest_path = target_dir / "manifest.json"
     manifest = None
     if manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            manifest = None
-        if manifest and (manifest.get("path") != str(path) or manifest.get("cacheKey") != key):
-            manifest = None
+        for _ in range(5):
+            try:
+                text = manifest_path.read_text(encoding="utf-8")
+                if text.strip():
+                    manifest = json.loads(text)
+                    break
+            except (OSError, json.JSONDecodeError):
+                pass
+            time.sleep(0.02)
+        if manifest:
+            p_str = str(path) if path else ""
+            if p_str and p_str != "." and manifest.get("path") and manifest.get("path") != p_str:
+                manifest = None
+            elif key and manifest.get("cacheKey") and manifest.get("cacheKey") != key:
+                manifest = None
+            if manifest:
+                with _MANIFEST_LOCK:
+                    _MANIFEST_CACHE[key] = manifest
+                return manifest
+
     if not manifest:
         legacy_items = []
         for png in sorted(target_dir.glob("page-*.png")):
@@ -511,7 +562,7 @@ def read_pdf_cache_manifest(path: Path, dpi: int, key: str, target_dir: Path) ->
                 legacy_items.append(pdf_page_item(path, key, page, png))
         if not legacy_items:
             return None
-        return {
+        m = {
             "name": path.name,
             "path": str(path),
             "dpi": dpi,
@@ -522,15 +573,10 @@ def read_pdf_cache_manifest(path: Path, dpi: int, key: str, target_dir: Path) ->
             "errors": [],
             "items": legacy_items,
         }
-    items = []
-    for item in manifest.get("items", []):
-        page = int(item.get("page") or 0)
-        png = target_dir / f"page-{page}.png"
-        if page > 0 and png.exists() and png.stat().st_size > 0:
-            items.append(pdf_page_item(path, key, page, png))
-    if not items:
-        return None
-    manifest["items"] = items
+        with _MANIFEST_LOCK:
+            _MANIFEST_CACHE[key] = m
+        return m
+
     return manifest
 
 
@@ -543,22 +589,30 @@ def write_pdf_cache_manifest(
     items: list[dict],
     errors: list[dict],
 ) -> None:
+    rendered_count = len([it for it in items if it.get("bytes", 0) > 0])
     manifest = {
         "name": path.name,
         "path": str(path),
         "dpi": dpi,
         "pages": page_count,
-        "renderedPages": len(items),
+        "renderedPages": rendered_count,
         "cacheKey": key,
-        "complete": len(items) == page_count and not errors,
+        "complete": rendered_count == page_count and not errors,
         "errors": errors,
         "items": items,
         "updatedAt": datetime.now().isoformat(timespec="seconds"),
     }
-    (target_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    with _MANIFEST_LOCK:
+        _MANIFEST_CACHE[key] = manifest
+        try:
+            tmp = target_dir / "manifest.json.tmp"
+            tmp.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, target_dir / "manifest.json")
+        except Exception:
+            pass
 
 
 def poppler_tool(name: str) -> str | None:
@@ -639,11 +693,9 @@ def run_poppler(args: list[str], timeout: int) -> subprocess.CompletedProcess[st
 
 def pdf_page_count(path: Path) -> int:
     try:
-        import fitz
-        doc = fitz.open(str(path))
-        count = len(doc)
-        doc.close()
-        return count
+        with _FITZ_RENDER_LOCK:
+            doc = get_fitz_doc(path)
+            return len(doc)
     except Exception:
         pass
 
@@ -2659,69 +2711,61 @@ def render_pdf(
             }
 
     # 1. Быстрый рендеринг через PyMuPDF (fitz) без создания сотен процессов
-    _FITZ_RENDER_LOCK.acquire()
-    try:
-        import fitz
+    with _FITZ_RENDER_LOCK:
         try:
-            doc = fitz.open(str(path))
-        except Exception:
-            doc = fitz.open(stream=path.read_bytes(), filetype="pdf")
-        page_count = len(doc)
-        pages = []
-        errors = []
-        rendered_count = 0
-        cache_hit_count = 0
+            doc = get_fitz_doc(path)
+            page_count = len(doc)
+            pages = []
+            errors = []
+            rendered_count = 0
+            cache_hit_count = 0
 
-        # Для каталогов и больших PDF (> 50 страниц) не рендерим сотни страниц в память/диск за один запрос:
-        # первично отдаём окно первых 20 страниц, остальные подгружаются лениво по номерам страниц (/api/pdf/page)
-        MAX_INITIAL_PAGES = 3 # Only render a small buffer synchronously
-        pages_to_render = 1 if first_page_only else min(page_count, MAX_INITIAL_PAGES)
-        for page_idx in range(pages_to_render):
-            page_num = page_idx + 1
-            png = target_dir / f"page-{page_num}.png"
-            if png.exists() and png.stat().st_size > 0:
-                cache_hit_count += 1
-            else:
-                try:
-                    pdf_page = doc[page_idx]
-                    pix = pdf_page.get_pixmap(dpi=dpi)
-                    pix.save(str(png))
-                    rendered_count += 1
-                except Exception as err:
-                    errors.append({"page": page_num, "error": str(err)})
-                    continue
+            # Для каталогов и больших PDF (> 50 страниц) не рендерим сотни страниц в память/диск за один запрос:
+            # первично отдаём окно первых 3 страниц, остальные подгружаются лениво по номерам страниц (/api/pdf/page)
+            MAX_INITIAL_PAGES = 3 # Only render a small buffer synchronously
+            pages_to_render = 1 if first_page_only else min(page_count, MAX_INITIAL_PAGES)
+            for page_idx in range(pages_to_render):
+                page_num = page_idx + 1
+                png = target_dir / f"page-{page_num}.png"
+                if png.exists() and png.stat().st_size > 0:
+                    cache_hit_count += 1
+                else:
+                    try:
+                        pdf_page = doc[page_idx]
+                        pix = pdf_page.get_pixmap(dpi=dpi)
+                        pix.save(str(png))
+                        rendered_count += 1
+                    except Exception as err:
+                        errors.append({"page": page_num, "error": str(err)})
+                        continue
 
-        for page_num in range(1, page_count + 1):
-            png = target_dir / f"page-{page_num}.png"
-            pages.append({
-                "page": page_num,
-                "name": f"{path.name} — стр. {page_num}",
-                "url": f"/cache/pdf/{key}/{png.name}",
-                "bytes": png.stat().st_size if png.exists() else 0,
-            })
+            for page_num in range(1, page_count + 1):
+                png = target_dir / f"page-{page_num}.png"
+                pages.append({
+                    "page": page_num,
+                    "name": f"{path.name} — стр. {page_num}",
+                    "url": f"/cache/pdf/{key}/{png.name}",
+                    "bytes": png.stat().st_size if png.exists() else 0,
+                })
 
-        doc.close()
-
-        if pages:
-            write_pdf_cache_manifest(path, dpi, key, target_dir, page_count, pages, errors)
-            return {
-                "name": path.name,
-                "path": str(path),
-                "sourcePath": str(path),
-                "dpi": dpi,
-                "pages": page_count,
-                "renderedPages": len(pages),
-                "cacheKey": key,
-                "cacheHit": cache_hit_count == pages_to_render,
-                "cacheHitPages": cache_hit_count,
-                "newRenderedPages": rendered_count,
-                "errors": errors,
-                "items": pages,
-            }
-    except Exception as fitz_err:
-        pass
-    finally:
-        _FITZ_RENDER_LOCK.release()
+            if pages:
+                write_pdf_cache_manifest(path, dpi, key, target_dir, page_count, pages, errors)
+                return {
+                    "name": path.name,
+                    "path": str(path),
+                    "sourcePath": str(path),
+                    "dpi": dpi,
+                    "pages": page_count,
+                    "renderedPages": len(pages),
+                    "cacheKey": key,
+                    "cacheHit": cache_hit_count == pages_to_render,
+                    "cacheHitPages": cache_hit_count,
+                    "newRenderedPages": rendered_count,
+                    "errors": errors,
+                    "items": pages,
+                }
+        except Exception as fitz_err:
+            pass
 
     # 2. Запасной рендеринг через Poppler (если PyMuPDF недоступен или выдал сбой)
     pdftoppm = poppler_tool("pdftoppm")
@@ -2845,27 +2889,22 @@ def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI, page_time
             "item": item,
         }
 
-    # 2. Быстрый рендеринг через PyMuPDF (одно открытие документа)
+    # 2. Быстрый рендеринг через PyMuPDF (переиспользуем открытый документ в памяти)
     if not cache_hit:
-        _FITZ_RENDER_LOCK.acquire()
-        try:
-            import fitz
-            doc = fitz.open(str(path))
-            page_count = len(doc)
-            if page < 1 or page > page_count:
-                doc.close()
-                raise ValueError(f"Страница {page} вне диапазона 1-{page_count}")
-            pdf_page = doc[page - 1]
-            pix = pdf_page.get_pixmap(dpi=dpi)
-            pix.save(str(png))
-            doc.close()
-            cache_hit = png.exists() and png.stat().st_size > 0
-        except ValueError:
-            raise
-        except Exception as fitz_err:
-            pass
-        finally:
-            _FITZ_RENDER_LOCK.release()
+        with _FITZ_RENDER_LOCK:
+            try:
+                doc = get_fitz_doc(path)
+                page_count = len(doc)
+                if page < 1 or page > page_count:
+                    raise ValueError(f"Страница {page} вне диапазона 1-{page_count}")
+                pdf_page = doc[page - 1]
+                pix = pdf_page.get_pixmap(dpi=dpi)
+                pix.save(str(png))
+                cache_hit = png.exists() and png.stat().st_size > 0
+            except ValueError:
+                raise
+            except Exception as fitz_err:
+                pass
 
     # 3. Запасной рендеринг через Poppler (только если PyMuPDF не сработал)
     if not cache_hit:
@@ -2905,10 +2944,20 @@ def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI, page_time
 
     item = pdf_page_item(path, key, page, png)
     cached_manifest = read_pdf_cache_manifest(path, dpi, key, target_dir)
-    items_by_page = {existing["page"]: existing for existing in (cached_manifest or {}).get("items", [])}
-    items_by_page[page] = item
-    items = [items_by_page[index] for index in sorted(items_by_page)]
-    write_pdf_cache_manifest(path, dpi, key, target_dir, page_count, items, (cached_manifest or {}).get("errors", []))
+    if cached_manifest and cached_manifest.get("items"):
+        all_items = cached_manifest["items"]
+        found = False
+        for it in all_items:
+            if it.get("page") == page:
+                it["bytes"] = png.stat().st_size if png.exists() else 0
+                found = True
+                break
+        if not found:
+            all_items.append(item)
+            all_items.sort(key=lambda x: x.get("page", 0))
+        write_pdf_cache_manifest(path, dpi, key, target_dir, page_count, all_items, cached_manifest.get("errors", []))
+    else:
+        write_pdf_cache_manifest(path, dpi, key, target_dir, page_count, [item], [])
 
     return {
         "name": path.name,
@@ -2928,32 +2977,33 @@ def get_pdf_toc(path: Path) -> dict:
     if not path.is_file() or path.suffix.casefold() != ".pdf":
         raise ValueError(f"Это не PDF-файл: {path}")
 
-    _FITZ_RENDER_LOCK.acquire()
-    try:
-        import fitz
+    with _FITZ_RENDER_LOCK:
         try:
-            doc = fitz.open(str(path))
-        except Exception:
-            doc = fitz.open(stream=path.read_bytes(), filetype="pdf")
-        toc = doc.get_toc()
-        page_count = len(doc)
-        doc.close()
-        items = []
-        for level, title, page in toc:
-            items.append({
-                "level": level,
-                "title": title.strip(),
-                "page": max(1, min(page, page_count))
-            })
-        return {
-            "name": path.name,
-            "path": str(path),
-            "totalPages": page_count,
-            "count": len(items),
-            "toc": items
-        }
-    finally:
-        _FITZ_RENDER_LOCK.release()
+            doc = get_fitz_doc(path)
+            toc = doc.get_toc()
+            page_count = len(doc)
+            items = []
+            for level, title, page in toc:
+                items.append({
+                    "level": level,
+                    "title": title.strip(),
+                    "page": max(1, min(page, page_count))
+                })
+            return {
+                "name": path.name,
+                "path": str(path),
+                "totalPages": page_count,
+                "count": len(items),
+                "toc": items
+            }
+        except Exception as e:
+            return {
+                "name": path.name,
+                "path": str(path),
+                "totalPages": 0,
+                "count": 0,
+                "toc": []
+            }
 
 
 class LauncherHandler(BaseHTTPRequestHandler):
@@ -3817,11 +3867,9 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     import re
                     match = re.match(r"^page-(\d+)\.png$", parts[2])
                     if match:
-                        manifest_path = target.parent / "manifest.json"
-                        if manifest_path.exists():
+                        manifest = read_pdf_cache_manifest(Path(), 0, parts[1], target.parent)
+                        if manifest and manifest.get("path"):
                             try:
-                                import json
-                                manifest = json.loads(manifest_path.read_text("utf-8"))
                                 original_path = Path(manifest["path"])
                                 dpi = manifest.get("dpi", DEFAULT_PDF_DPI)
                                 render_pdf_page(original_path, int(match.group(1)), dpi)
