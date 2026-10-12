@@ -459,7 +459,8 @@ def list_object_summaries() -> list[dict]:
 
 def pdf_cache_key(path: Path, dpi: int = 0) -> str:
     stat = path.stat()
-    raw = f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}"
+    dpi_tag = f"|dpi={dpi}" if dpi and dpi != DEFAULT_PDF_DPI else ""
+    raw = f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}{dpi_tag}"
     return hashlib.sha1(raw.casefold().encode("utf-8")).hexdigest()[:20]
 
 

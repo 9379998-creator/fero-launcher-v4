@@ -47,6 +47,7 @@ const state = {
   diffFilter: false,
   diffPollTimer: null,
   viewMode: "standard",
+  viewerDpi: Number(localStorage.getItem("launcher_viewer_dpi")) || 150,
   activeNavZone: "tree",
   thumbScale: 1,
   treeScale: 1,
@@ -114,6 +115,7 @@ const els = {
   viewZoomIn: document.getElementById("viewZoomIn"),
   viewFit: document.getElementById("viewFit"),
   viewRotate: document.getElementById("viewRotate"),
+  viewToggleDpi: document.getElementById("viewToggleDpi"),
   viewOpenNative: document.getElementById("viewOpenNative"),
   viewPrevPage: document.getElementById("viewPrevPage"),
   viewNextPage: document.getElementById("viewNextPage"),
@@ -3041,13 +3043,12 @@ function updateRibbonLoadMore() {
 }
 
 function pageKey(page) {
+  if (!page) return "";
   if (page.type === "missing-preview" || page.type === "native-file") return `native|${page.sourcePath || page.documentPath || page.name}`;
-  // У картинок нет documentPath/page — без своей ветки все они получали
-  // один ключ "|" и в ленту вставала только первая (остальные скипались
-  // как «дубликаты»).
   if (page.previewType === "IMAGE") return `image|${page.previewFor?.path || page.path || page.url || page.name}`;
   if (page.previewType === "TXT") return `txt|${page.previewFor?.path || page.path || page.name}`;
-  return `${page.documentPath || ""}|${page.page || ""}`;
+  const docPath = page.documentPath || page.sourcePath || page.previewFor?.path || page.path || "";
+  return `${docPath}|${page.page || 1}`;
 }
 
 function updateActivePdfThumb() {
@@ -3110,16 +3111,32 @@ function extOfPath(path) {
   return dot > 0 ? base.slice(dot + 1).toUpperCase() : "";
 }
 
+function updateViewerDpiButton(loading = false) {
+  if (!els.viewToggleDpi) return;
+  const is300 = state.viewerDpi === 300;
+  els.viewToggleDpi.textContent = loading ? `${state.viewerDpi} DPI…` : `${state.viewerDpi} DPI`;
+  els.viewToggleDpi.classList.toggle("dpi-300", is300);
+  els.viewToggleDpi.classList.toggle("loading", loading);
+  els.viewToggleDpi.title = is300
+    ? "Качество листа: 300 DPI (сверхчёткость). Нажмите для переключения на 150 DPI"
+    : "Качество листа: 150 DPI (по умолчанию). Нажмите для переключения на 300 DPI";
+}
+
 let activeHighQualityController = null;
 
-async function requestHighQualityPage(page) {
-  if (!page.documentPath || !page.page || page.dpi >= PDF_QUALITY_DPI) return;
-  const key = pageKey(page);
-  if (state.highQualityPages.has(key)) {
-    const cached = state.highQualityPages.get(key);
-    if (state.activePageKey === key) {
+async function requestHighQualityPage(page, targetDpi = (state.viewerDpi || 150)) {
+  const sourceDocPath = page.documentPath || page.sourcePath || page.previewFor?.path || page.path || "";
+  const pageNum = Number(page.page) || 1;
+  if (!sourceDocPath || !pageNum) return;
+
+  const baseKey = pageKey(page);
+  const cacheKey = `${baseKey}@${targetDpi}`;
+  if (state.highQualityPages.has(cacheKey)) {
+    const cached = state.highQualityPages.get(cacheKey);
+    if (state.activePageKey === baseKey) {
       state.activePageUrl = cached.url;
       els.pdfPageImage.src = cached.url;
+      updateViewerDpiButton(false);
     }
     return;
   }
@@ -3130,31 +3147,29 @@ async function requestHighQualityPage(page) {
   }
   const controller = new AbortController();
   activeHighQualityController = controller;
+  updateViewerDpiButton(true);
 
   try {
     const endpoint = page.previewType === "DWG_MODEL"
       ? "/api/dwg/model-page"
       : "/api/pdf/page";
-    const sourceFile = page.previewType === "DWG_MODEL"
-      ? page.previewFor?.path
-      : page.documentPath;
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file: sourceFile, page: page.page, dpi: PDF_QUALITY_DPI }),
+      body: JSON.stringify({ file: sourceDocPath, page: pageNum, dpi: targetDpi }),
       signal: controller.signal,
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "PDF page render failed");
+    if (!response.ok) throw new Error(payload.error || "Page render failed");
     const highPage = {
       ...page,
       ...payload.item,
-      documentPath: payload.path,
-      dpi: payload.dpi,
+      documentPath: payload.path || sourceDocPath,
+      dpi: payload.dpi || targetDpi,
       cacheHit: payload.cacheHit,
     };
-    state.highQualityPages.set(key, highPage);
-    if (state.activePageKey === key) {
+    state.highQualityPages.set(cacheKey, highPage);
+    if (state.activePageKey === baseKey) {
       state.activePageUrl = highPage.url;
       els.pdfPageImage.src = highPage.url;
     }
@@ -3164,6 +3179,7 @@ async function requestHighQualityPage(page) {
   } finally {
     if (activeHighQualityController === controller) {
       activeHighQualityController = null;
+      updateViewerDpiButton(false);
     }
   }
 }
@@ -3439,7 +3455,8 @@ function showPdfPage(page, options = {}) {
   }
 
   clearExcelViewer();
-  const highPage = state.highQualityPages.get(key);
+  const currentDpi = state.viewerDpi || 150;
+  const highPage = state.highQualityPages.get(`${key}@${currentDpi}`);
   const displayPage = highPage || page;
   const targetDocPath = page.previewFor?.path || page.sourcePath || page.documentPath || "";
   setActiveNativePath(targetDocPath);
@@ -3453,14 +3470,10 @@ function showPdfPage(page, options = {}) {
   els.pdfViewer.classList.remove("empty");
   els.viewerControls.hidden = false;
   updateActivePdfThumb();
+  updateViewerDpiButton();
   if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) applyPageView();
   
-  const isPdf = String(targetDocPath).toLowerCase().endsWith(".pdf");
-  if (isPdf) {
-    renderPdfJsPage(page);
-  } else {
-    requestHighQualityPage(page);
-  }
+  requestHighQualityPage(page, currentDpi);
   
   updatePagePosition(page);
   const hasMultiplePages = (state.renderedPages?.length || 0) > 1 || (Number(page.totalPages) || 0) > 1;
@@ -4514,6 +4527,21 @@ els.excelTabs.addEventListener("wheel", (event) => {
 }, { passive: false });
 els.viewZoomOut.addEventListener("click", () => zoomPdf(0.82));
 els.viewZoomIn.addEventListener("click", () => zoomPdf(1.22));
+
+if (els.viewToggleDpi) {
+  els.viewToggleDpi.addEventListener("click", (e) => {
+    e.stopPropagation();
+    state.viewerDpi = state.viewerDpi === 300 ? 150 : 300;
+    try {
+      localStorage.setItem("launcher_viewer_dpi", String(state.viewerDpi));
+    } catch (_) {}
+    updateViewerDpiButton();
+    const currPage = state.renderedPages?.find((p) => pageKey(p) === state.activePageKey) || state.renderedPages?.[0];
+    if (currPage) {
+      requestHighQualityPage(currPage, state.viewerDpi);
+    }
+  });
+}
 
 if (els.viewPrevPage) {
   els.viewPrevPage.addEventListener("click", (e) => {

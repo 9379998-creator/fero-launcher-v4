@@ -1392,6 +1392,26 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.view-dpi-btn {
+  font-weight: 600;
+  min-width: 66px;
+  font-size: 11px;
+  letter-spacing: 0.3px;
+  transition: all 0.15s ease;
+}
+
+.view-dpi-btn.dpi-300 {
+  background: #007acc !important;
+  color: #fff !important;
+  border-color: #0062a3 !important;
+  box-shadow: 0 0 6px rgba(0, 122, 204, 0.4);
+}
+
+.view-dpi-btn.loading {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 .viewer-controls button.active {
   background: var(--active-strong);
 }
