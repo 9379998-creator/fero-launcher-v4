@@ -1041,6 +1041,14 @@ textarea:focus {
   display: none !important;
 }
 
+.shell:not(.full-view) .pdf-viewer:not(.stage-active) .pdf-stage {
+  display: none !important;
+}
+
+.shell:not(.full-view) .pdf-toc-drawer {
+  display: none !important;
+}
+
 .shell:not(.full-view) .pdf-viewer .pdf-stage:has(.excel-viewer:not([hidden])),
 .shell:not(.full-view) .pdf-viewer .pdf-stage:has(#wordViewer:not([hidden])) {
   display: block !important;

@@ -3646,19 +3646,23 @@ function setViewerMode(mode) {
   state.viewMode = mode;
   state.view.userZoomed = false;
   els.shell.classList.toggle("full-view", mode === "full");
-  const showControls = mode === "full" || els.pdfViewer?.classList.contains("stage-active");
-  if (els.viewerControls) els.viewerControls.hidden = !showControls;
   if (mode === "full") {
     setStageActive(true);
+    if (els.viewerControls) els.viewerControls.hidden = false;
     if (els.backToTree) {
       els.backToTree.disabled = false;
       els.backToTree.title = "Вернуться в ленту миниатюр (Окно 2) к текущему листу";
     }
   } else {
+    setStageActive(false);
+    if (els.pdfTocDrawer) els.pdfTocDrawer.hidden = true;
+    if (els.viewerControls) els.viewerControls.hidden = true;
     if (els.backToTree) {
       els.backToTree.title = "Вернуться к предыдущему состоянию дерева";
     }
   }
+  const showControls = mode === "full" || els.pdfViewer?.classList.contains("stage-active");
+  if (els.viewerControls) els.viewerControls.hidden = !showControls;
   const hasMultiplePages = (state.renderedPages?.length || 0) > 1 || (Number(state.renderedPages?.[0]?.totalPages) || 0) > 1;
   if (els.viewPrevPage) els.viewPrevPage.hidden = !hasMultiplePages;
   if (els.viewNextPage) els.viewNextPage.hidden = !hasMultiplePages;
@@ -5100,6 +5104,10 @@ function handleGlobalEscape() {
   if (!els.pdfPageImage.hidden && state.view.dragging) {
     state.view.dragging = false;
     updateViewTransform();
+    return;
+  }
+  if (els.pdfTocDrawer && !els.pdfTocDrawer.hidden) {
+    els.pdfTocDrawer.hidden = true;
     return;
   }
   // 1. Из полноэкранного режима возвращаемся в стандартный режим с двумя полями
