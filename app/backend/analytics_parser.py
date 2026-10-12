@@ -129,7 +129,11 @@ class AutoCadNativeAdapter(BaseAdapter):
         facts = []
         pythoncom.CoInitialize() # Важно для фонового потока
         try:
-            acad = win32com.client.Dispatch("AutoCAD.Application")
+            try:
+                acad = win32com.client.Dispatch("ZWCAD.Application")
+            except Exception:
+                acad = win32com.client.Dispatch("AutoCAD.Application")
+                
             acad.Visible = False
             doc = acad.Documents.Open(str(Path(file_path).resolve()), True)
             
