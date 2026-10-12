@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+*.db
 .venv/
 venv/
 
@@ -15,10 +16,12 @@ runtime/cache/**
 runtime/manifests/**
 runtime/logs/**
 runtime/bench/**
+runtime/db/**
 runtime/native_apps.json
 !runtime/cache/.gitkeep
 !runtime/manifests/.gitkeep
 !runtime/logs/.gitkeep
+!runtime/db/.gitkeep
 
 # DWG render probe artifacts and stray test drawings
 runtime/dwg-probe/
