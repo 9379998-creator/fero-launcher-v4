@@ -3257,7 +3257,8 @@ async function getPdfjsDocument(path) {
 
 async function renderPdfJsPage(pageObj) {
   const currentGen = ++viewerGeneration;
-  const sourcePath = pageObj.documentPath || pageObj.path || pageObj.sourcePath;
+  const sourcePath = [pageObj.documentPath, pageObj.sourcePath, pageObj.previewFor?.path, state.activeTocPath]
+    .find((p) => p && String(p).toLowerCase().endsWith(".pdf")) || pageObj.documentPath || pageObj.sourcePath || pageObj.path;
   const pageNum = Number(pageObj.page) || 1;
   const canvas = document.getElementById("pdfPageCanvas");
   if (!canvas) return;
@@ -4527,7 +4528,9 @@ async function checkAndShowPdfToc(docPath, currentPageNum) {
   }
 
   // Если уже загружено оглавление для текущего файла
-  if (state.activeTocPath === docPath && state.currentToc) {
+  const normActive = (state.activeTocPath || "").replace(/\//g, "\\").toLowerCase();
+  const normDoc = (docPath || "").replace(/\//g, "\\").toLowerCase();
+  if (normActive && normActive === normDoc && state.currentToc) {
     els.viewToggleToc.hidden = false;
     highlightActiveTocItem(currentPageNum);
     return;
@@ -4602,7 +4605,12 @@ function renderPdfTocList(items, filterQuery = "") {
 
     row.append(titleEl, pageEl);
 
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      jumpToPdfPage(item.page, item.title);
+    });
+    row.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
       jumpToPdfPage(item.page, item.title);
     });
 
@@ -4631,13 +4639,22 @@ async function jumpToPdfPage(targetPage, sectionTitle = "") {
   const num = Number(targetPage);
   if (!num || !state.activeTocPath) return;
 
+  const normToc = (state.activeTocPath || "").replace(/\//g, "\\").toLowerCase();
+
   // Ищем страницу в уже загруженных
-  const existing = state.renderedPages.find(
-    (p) => (p.documentPath === state.activeTocPath || thumbPathForPage(p) === state.activeTocPath) && Number(p.page) === num
-  );
+  const existing = state.renderedPages.find((p) => {
+    const pDoc = (p.documentPath || thumbPathForPage(p) || p.sourcePath || "").replace(/\//g, "\\").toLowerCase();
+    return pDoc === normToc && Number(p.page) === num;
+  });
 
   if (existing) {
+    state.view.userZoomed = false;
     showPdfPage(existing);
+    highlightActiveTocItem(num);
+    const thumb = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(pageKey(existing))}"]`);
+    if (thumb) {
+      thumb.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
     return;
   }
 
@@ -4662,7 +4679,9 @@ async function jumpToPdfPage(targetPage, sectionTitle = "") {
     };
 
     await appendPagesToViewer([newPage], null, state.renderEpoch);
+    state.view.userZoomed = false;
     showPdfPage(newPage);
+    highlightActiveTocItem(num);
     finishProgress();
   } catch (err) {
     showOperationError(err);
@@ -4745,9 +4764,14 @@ els.pdfPageImage.addEventListener("dblclick", (e) => {
   setViewerMode(state.viewMode === "full" ? "standard" : "full");
 });
 
+if (els.pdfTocDrawer) {
+  els.pdfTocDrawer.addEventListener("dblclick", (e) => e.stopPropagation());
+  els.pdfTocDrawer.addEventListener("click", (e) => e.stopPropagation());
+}
+
 if (els.pdfStage) {
   els.pdfStage.addEventListener("dblclick", (e) => {
-    if (e.target.closest(".viewer-controls, .excel-tabs-bar, button, a, input")) return;
+    if (e.target.closest(".viewer-controls, .excel-tabs-bar, .pdf-toc-drawer, button, a, input")) return;
     if (pdfDragMoved) return;
     setViewerMode(state.viewMode === "full" ? "standard" : "full");
   });

@@ -3150,7 +3150,6 @@ class LauncherHandler(BaseHTTPRequestHandler):
                         # Handle multiple ranges by ignoring them or picking the first one (RFC 9110 compliant fallback)
                         range_str = range_header.replace("bytes=", "").split(",")[0].strip()
                         ranges = range_str.split("-")
-                        print("RANGE PARSED:", ranges)
                         
                         if ranges[0] == "":
                             # Suffix request: bytes=-1024
