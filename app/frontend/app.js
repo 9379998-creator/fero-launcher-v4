@@ -3067,18 +3067,28 @@ function updateActivePdfThumb() {
   });
 }
 
-function updatePagePosition(page) {
-  // Счётчик «Стр. N из M» слева вверху сцены: всегда видно, на каком листе
-  // какого документа стоим. Для одиночных страниц и карточек — скрыт.
+function updatePagePosition(page, currentDpiInfo = null) {
+  // Счётчик «Стр. N из M» слева вверху сцены: всегда видно лист, DPI и точные пиксели
   if (!els.pagePosition) return;
   const num = Number(page?.page) || 0;
   const total = Number(page?.totalPages) || 0;
-  if (!num || total < 2) {
+  if (!num && !total) {
     els.pagePosition.hidden = true;
     return;
   }
   els.pagePosition.hidden = false;
-  els.pagePosition.textContent = `Стр. ${num} из ${total}`;
+  const pageText = total >= 2 ? `Стр. ${num} из ${total}` : (num ? `Стр. ${num}` : "");
+  
+  const natW = els.pdfPageImage?.naturalWidth || 0;
+  const natH = els.pdfPageImage?.naturalHeight || 0;
+  let dpiLabel = "";
+  if (currentDpiInfo) {
+    dpiLabel = ` · ${currentDpiInfo}`;
+  } else if (natW && natH) {
+    const dpi = natW > 2000 ? 300 : (natW > 1000 ? 150 : 72);
+    dpiLabel = ` · ${dpi} DPI (${natW}×${natH} px)`;
+  }
+  els.pagePosition.textContent = `${pageText}${dpiLabel}`.trim();
 }
 
 function setActiveNativePath(path) {
@@ -4508,7 +4518,11 @@ els.backToTree.addEventListener("click", () => {
 els.treeSearch.addEventListener("input", () => {
   renderTree();
 });
-els.pdfPageImage.addEventListener("load", () => applyPageView());
+els.pdfPageImage.addEventListener("load", () => {
+  applyPageView();
+  const currPage = state.renderedPages?.find((p) => pageKey(p) === state.activePageKey) || state.renderedPages?.[0];
+  if (currPage) updatePagePosition(currPage);
+});
 els.excelSheetFrame.addEventListener("load", () => {
   forwardExcelSheetContextMenu();
   if (!state.excelWorkbook) return;
