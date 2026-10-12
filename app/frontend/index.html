@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>F-Engineering Launcher v3</title>
+  <title>F.E.R.O. Launcher v4</title>
   <link rel="icon" href="favicon.ico" type="image/x-icon">
-  <link rel="stylesheet" href="styles.css?v=20260928-winapp-import-fetchfix">
+  <link rel="stylesheet" href="styles.css?v=20261012-stage-nav-fix">
 </head>
 <body>
   <div class="app-window">
@@ -68,8 +68,8 @@
                 </svg>
               </div>
               <div class="welcome-title-group">
-                <div class="welcome-title">F-Engineering Launcher v3</div>
-                <div class="welcome-subtitle">Консоль управления библиотекой рабочей документации</div>
+                <div class="welcome-title">F.E.R.O. Launcher v4</div>
+                <div class="welcome-subtitle">Консоль управления рабочей документацией и фасадными конструкциями</div>
               </div>
             </div>
             <div class="welcome-divider"></div>
@@ -154,13 +154,18 @@
           </section>
           <div class="viewer-controls" id="viewerControls" hidden>
             <button id="viewOpenNative" type="button" title="Открыть в программе по умолчанию">Открыть</button>
+            <button id="viewPrevPage" type="button" title="Предыдущая страница (←)">‹ Стр</button>
+            <button id="viewNextPage" type="button" title="Следующая страница (→)">Стр ›</button>
             <button id="viewZoomOut" type="button" title="Уменьшить">−</button>
             <button id="viewZoomIn" type="button" title="Увеличить">+</button>
             <button id="viewFit" type="button" title="Вписать страницу">Вписать</button>
             <button id="viewRotate" type="button" title="Повернуть на 90°">⟳</button>
             <button id="viewToggleToc" type="button" title="Оглавление и разделы каталога" hidden>📑 Разделы</button>
+            <button id="viewExitFull" type="button" title="Вернуться в ленту (Окно 2) к текущему листу">⤢ В ленту</button>
             <button id="viewCopyLink" type="button" title="Копировать ссылку на страницу и узел">🔗 Ссылка</button>
           </div>
+          <button id="stagePrevBtn" class="stage-arrow stage-arrow-prev" type="button" title="Предыдущая страница (←)" hidden>‹</button>
+          <button id="stageNextBtn" class="stage-arrow stage-arrow-next" type="button" title="Следующая страница (→)" hidden>›</button>
           <div class="pdf-toc-drawer" id="pdfTocDrawer" hidden>
             <div class="pdf-toc-header">
               <span class="pdf-toc-title">Разделы каталога</span>

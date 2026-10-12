@@ -115,6 +115,11 @@ const els = {
   viewFit: document.getElementById("viewFit"),
   viewRotate: document.getElementById("viewRotate"),
   viewOpenNative: document.getElementById("viewOpenNative"),
+  viewPrevPage: document.getElementById("viewPrevPage"),
+  viewNextPage: document.getElementById("viewNextPage"),
+  viewExitFull: document.getElementById("viewExitFull"),
+  stagePrevBtn: document.getElementById("stagePrevBtn"),
+  stageNextBtn: document.getElementById("stageNextBtn"),
   viewToggleToc: document.getElementById("viewToggleToc"),
   viewCopyLink: document.getElementById("viewCopyLink"),
   pdfTocDrawer: document.getElementById("pdfTocDrawer"),
@@ -3463,6 +3468,9 @@ function showPdfPage(page, options = {}) {
   }
   
   updatePagePosition(page);
+  const hasMultiplePages = (state.renderedPages?.length || 0) > 1 || (Number(page.totalPages) || 0) > 1;
+  if (els.stagePrevBtn) els.stagePrevBtn.hidden = !(state.viewMode === "full" && hasMultiplePages);
+  if (els.stageNextBtn) els.stageNextBtn.hidden = !(state.viewMode === "full" && hasMultiplePages);
   checkAndShowPdfToc(targetDocPath, page.page);
 }
 
@@ -3645,15 +3653,33 @@ function setViewerMode(mode) {
   if (els.viewerControls) els.viewerControls.hidden = !showControls;
   if (mode === "full") {
     setStageActive(true);
+    if (els.backToTree) {
+      els.backToTree.disabled = false;
+      els.backToTree.title = "Вернуться в ленту миниатюр (Окно 2) к текущему листу";
+    }
+  } else {
+    if (els.backToTree) {
+      els.backToTree.title = "Вернуться к предыдущему состоянию дерева";
+    }
   }
+  const hasMultiplePages = (state.renderedPages?.length || 0) > 1 || (Number(state.renderedPages?.[0]?.totalPages) || 0) > 1;
+  if (els.stagePrevBtn) els.stagePrevBtn.hidden = !(mode === "full" && hasMultiplePages);
+  if (els.stageNextBtn) els.stageNextBtn.hidden = !(mode === "full" && hasMultiplePages);
+
   if (state.revealedPath) revealPathInTree(state.revealedPath);
-  // Возврат из полноэкранного: лента прокручивается к активной миниатюре,
-  // чтобы вернуться в ту же позицию, а не неизвестно куда.
+  // Возврат из полноэкранного (Окно 3 -> Окно 2): лента гарантированно прокручивается к текущему листу
   if (wasFull && mode !== "full" && state.activePageKey) {
-    try {
-      const thumbEl = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(state.activePageKey)}"]`);
-      if (thumbEl) thumbEl.scrollIntoView({ behavior: "auto", block: "nearest", inline: "center" });
-    } catch (e) {}
+    updateActivePdfThumb();
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        try {
+          const thumbEl = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(state.activePageKey)}"]`);
+          if (thumbEl) {
+            thumbEl.scrollIntoView({ behavior: "smooth", block: "center" });
+          }
+        } catch (e) {}
+      });
+    });
   }
   requestAnimationFrame(() => requestAnimationFrame(() => {
     fitPdfPage();
@@ -4462,6 +4488,37 @@ els.excelTabs.addEventListener("wheel", (event) => {
 }, { passive: false });
 els.viewZoomOut.addEventListener("click", () => zoomPdf(0.82));
 els.viewZoomIn.addEventListener("click", () => zoomPdf(1.22));
+
+if (els.viewPrevPage) {
+  els.viewPrevPage.addEventListener("click", (e) => {
+    e.stopPropagation();
+    stepThumbnails(-1);
+  });
+}
+if (els.viewNextPage) {
+  els.viewNextPage.addEventListener("click", (e) => {
+    e.stopPropagation();
+    stepThumbnails(1);
+  });
+}
+if (els.viewExitFull) {
+  els.viewExitFull.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setViewerMode("standard");
+  });
+}
+if (els.stagePrevBtn) {
+  els.stagePrevBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    stepThumbnails(-1);
+  });
+}
+if (els.stageNextBtn) {
+  els.stageNextBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    stepThumbnails(1);
+  });
+}
 // «Вписать» возвращает всё в нормальное состояние: масштаб картинки,
 // сдвиг и поворот. Панель при этом никуда не уезжает.
 if (els.viewOpenNative) {
@@ -4623,15 +4680,25 @@ function renderPdfTocList(items, filterQuery = "") {
 function highlightActiveTocItem(pageNum) {
   if (!els.pdfTocList || !pageNum) return;
   const num = Number(pageNum);
-  let activeEl = null;
-  [...els.pdfTocList.querySelectorAll(".pdf-toc-item")].forEach((el) => {
+  const items = [...els.pdfTocList.querySelectorAll(".pdf-toc-item")];
+  if (!items.length) return;
+
+  // Ищем раздел, в диапазон которого попадает страница (наибольший стартовый лист <= текущего листа)
+  let bestItem = null;
+  let bestPage = -1;
+  for (const el of items) {
     const p = Number(el.dataset.page);
-    const isAct = p === num;
-    el.classList.toggle("active", isAct);
-    if (isAct) activeEl = el;
+    if (p <= num && p >= bestPage) {
+      bestPage = p;
+      bestItem = el;
+    }
+  }
+
+  items.forEach((el) => {
+    el.classList.toggle("active", el === bestItem);
   });
-  if (activeEl) {
-    activeEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  if (bestItem) {
+    bestItem.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 }
 
@@ -4763,6 +4830,15 @@ els.pdfPageImage.addEventListener("dblclick", (e) => {
   if (pdfDragMoved) return;
   setViewerMode(state.viewMode === "full" ? "standard" : "full");
 });
+
+const pdfCanvas = document.getElementById("pdfPageCanvas");
+if (pdfCanvas) {
+  pdfCanvas.addEventListener("dblclick", (e) => {
+    e.stopPropagation();
+    if (pdfDragMoved) return;
+    setViewerMode(state.viewMode === "full" ? "standard" : "full");
+  });
+}
 
 if (els.pdfTocDrawer) {
   els.pdfTocDrawer.addEventListener("dblclick", (e) => e.stopPropagation());
