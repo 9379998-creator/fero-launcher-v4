@@ -1437,33 +1437,16 @@ function updateTreeSelectionHighlight() {
   updateRailSelectionHighlight();
 }
 
-// Подсветка выделения на карточках ленты: карточка подсвечена, если её
-// файл входит в state.selectedPaths. Активная (текущий просмотр) рамка
-// (.active) живёт отдельно и не трогается.
+// В Окне 2 каждый отдельный лист или документ выделяется индивидуально.
+// Синим цветом подсвечивается только текущий активный лист/книга (.active).
+// Массовое выделение (.selected) снято со всех миниатюр, чтобы не заливать
+// синим цветом все сотни листов каталога.
 function updateRailSelectionHighlight() {
   if (!els.pdfThumbs) return;
-  const norms = new Set(
-    Array.from(state.selectedPaths).map((p) => String(p || "").replace(/\//g, "\\").toLowerCase())
-  );
   els.pdfThumbs.querySelectorAll(".pdf-thumb").forEach((thumb) => {
-    let p = "";
-    try {
-      if (thumb.classList.contains("excel-book-thumb") && thumb.dataset.workbookIndex !== undefined) {
-        p = state.excelWorkbooks?.[Number(thumb.dataset.workbookIndex)]?.path || "";
-      } else if (thumb.classList.contains("word-doc-thumb") && thumb.dataset.docIndex !== undefined) {
-        p = state.wordDocs?.[Number(thumb.dataset.docIndex)]?.path || "";
-      } else if (thumb.dataset.pageKey) {
-        const page = state.renderedPages.find((x) => {
-          try { return pageKey(x) === thumb.dataset.pageKey; } catch (_) { return false; }
-        });
-        p = page ? thumbPathForPage(page) : "";
-      }
-    } catch (_) {
-      p = "";
-    }
-    const hit = Boolean(p) && norms.has(String(p).replace(/\//g, "\\").toLowerCase());
-    thumb.classList.toggle("selected", hit);
+    thumb.classList.remove("selected");
   });
+  updateActivePdfThumb();
 }
 
 function rebuildVisibleRows() {
@@ -2880,11 +2863,12 @@ function createPageThumbElement(page) {
   thumb.addEventListener("click", (event) => {
     event.stopPropagation();
     state.activeNavZone = "thumbs";
-    // Выбор как в дереве; превью — только по обычному клику (как раньше).
-    const docPath = thumbPathForPage(page);
-    if (docPath) selectRailPath(docPath, event);
-    if (event.shiftKey || event.ctrlKey || event.metaKey) return;
     showPdfPage(page);
+    const docPath = thumbPathForPage(page);
+    if (docPath) {
+      revealPathInTree(docPath, { updateSelection: true, skipScroll: false });
+    }
+    thumb.focus();
     thumb.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
   });
 
@@ -2892,6 +2876,10 @@ function createPageThumbElement(page) {
     event.stopPropagation();
     state.activeNavZone = "thumbs";
     showPdfPage(page);
+    const docPath = thumbPathForPage(page);
+    if (docPath) {
+      revealPathInTree(docPath, { updateSelection: true, skipScroll: false });
+    }
     setViewerMode("full");
   });
   wrap.append(thumb);
@@ -3063,8 +3051,18 @@ function pageKey(page) {
 }
 
 function updateActivePdfThumb() {
+  const activeKey = state.activePageKey;
   [...els.pdfThumbs.querySelectorAll(".pdf-thumb")].forEach((thumb) => {
-    thumb.classList.toggle("active", thumb.dataset.pageKey === state.activePageKey);
+    let isAct = false;
+    if (thumb.dataset.pageKey) {
+      isAct = Boolean(activeKey && thumb.dataset.pageKey === activeKey);
+    } else if (thumb.classList.contains("excel-book-thumb") && thumb.dataset.workbookIndex !== undefined) {
+      isAct = Number(thumb.dataset.workbookIndex) === state.excelWorkbookIndex;
+    } else if (thumb.classList.contains("word-doc-thumb") && thumb.dataset.docIndex !== undefined) {
+      isAct = Number(thumb.dataset.docIndex) === state.wordDocIndex;
+    }
+    thumb.classList.toggle("active", isAct);
+    if (!isAct) thumb.classList.remove("selected");
   });
 }
 
@@ -3671,6 +3669,7 @@ function setViewerMode(mode) {
   // 1. В Окне 1 (дереве) гарантированно подсвечивается и выбирается этот файл!
   // 2. В Окне 2 (ленте) гарантированно центрируется и подсвечивается миниатюра текущего листа!
   if (wasFull && mode !== "full") {
+    state.activeNavZone = "thumbs";
     const activePage = state.renderedPages?.find((p) => pageKey(p) === state.activePageKey) || state.renderedPages?.[0];
     const docPath = (activePage && (thumbPathForPage(activePage) || activePage.documentPath || activePage.sourcePath)) || state.revealedPath || "";
     if (docPath) {
@@ -3683,6 +3682,7 @@ function setViewerMode(mode) {
           try {
             const thumbEl = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(state.activePageKey)}"]`);
             if (thumbEl) {
+              thumbEl.focus();
               thumbEl.scrollIntoView({ behavior: "smooth", block: "center" });
             }
           } catch (e) {}
@@ -4225,6 +4225,21 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
 
   refreshRenderProgress();
   updateRibbonLoadMore();
+
+  // После завершения рендера делаем Окно 2 сразу активным для навигации
+  if (state.renderedPages?.length) {
+    state.activeNavZone = "thumbs";
+    if (!state.activePageKey) {
+      state.activePageKey = pageKey(state.renderedPages[0]);
+    }
+    updateActivePdfThumb();
+    try {
+      const firstThumb = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(state.activePageKey)}"]`);
+      if (firstThumb) {
+        firstThumb.focus();
+      }
+    } catch (_) {}
+  }
 
   const errorCount = allErrors.length;
   const isSingleDwg = isSingle && itemsToRender[0]?.previewType === "DWG_MODEL";
@@ -5225,68 +5240,51 @@ window.addEventListener("keydown", (event) => {
 
     if (thumbEls.length > 0 && isThumbsActive) {
       event.preventDefault();
-      // Находим текущую активную карточку в DOM ленты Окна 2
-      let activeIdx = thumbEls.findIndex((el) => el.classList.contains("active"));
-      if (activeIdx < 0) {
-        const currNorm = (state.revealedPath || Array.from(state.selectedPaths)[0] || "").replace(/\//g, "\\").toLowerCase();
-        if (currNorm) {
-          activeIdx = thumbEls.findIndex((el) => {
-            const p = (el.dataset.path || "").replace(/\//g, "\\").toLowerCase();
-            return p && p === currNorm;
-          });
-        }
+      if (state.renderedPages?.length) {
+        stepThumbnails(event.key === "ArrowDown" ? 1 : -1);
+        return;
       }
-      if (activeIdx < 0) activeIdx = 0;
-
-      let nextIdx = event.key === "ArrowDown" ? activeIdx + 1 : activeIdx - 1;
-      if (nextIdx < 0) nextIdx = thumbEls.length - 1;
-      else if (nextIdx >= thumbEls.length) nextIdx = 0;
-
-      const nextThumb = thumbEls[nextIdx];
-      if (nextThumb) {
-        thumbEls.forEach((t, i) => t.classList.toggle("active", i === nextIdx));
-        nextThumb.focus();
-        nextThumb.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
-
-        // Синхронизация с Окном 1 и показ соответствующего файла
-        if (nextThumb.dataset.pageKey) {
-          const page = state.renderedPages?.find((p) => {
-            try { return pageKey(p) === nextThumb.dataset.pageKey; } catch (_) { return false; }
-          });
-          if (page) {
-            showPdfPage(page, { skipTreeScroll: false });
-            const docPath = thumbPathForPage(page);
-            if (docPath) {
-              revealPathInTree(docPath, { updateSelection: true, skipScroll: false });
-            }
-          }
-        } else if (nextThumb.classList.contains("excel-book-thumb") && nextThumb.dataset.workbookIndex !== undefined) {
-          const wbIdx = Number(nextThumb.dataset.workbookIndex);
-          const isStage = Boolean(els.pdfViewer?.classList.contains("stage-active"));
-          if (isStage) {
-            activateExcelWorkbook(wbIdx).catch(showOperationError);
-          } else {
-            state.excelWorkbookIndex = wbIdx;
-            renderExcelWorkbookRail();
-          }
-          const nextBook = state.excelWorkbooks?.[wbIdx];
-          if (nextBook?.path) {
-            revealPathInTree(nextBook.path, { updateSelection: true, skipScroll: false });
-          }
-        } else if (nextThumb.classList.contains("word-doc-thumb") && nextThumb.dataset.docIndex !== undefined) {
-          const dIdx = Number(nextThumb.dataset.docIndex);
-          const isStage = Boolean(els.pdfViewer?.classList.contains("stage-active"));
-          if (isStage) {
-            activateWordDocument(dIdx).catch(showOperationError);
-          } else {
-            state.wordDocIndex = dIdx;
-            renderWordDocumentRail();
-          }
-          const nextDoc = state.wordDocs?.[dIdx];
-          if (nextDoc?.path) {
-            revealPathInTree(nextDoc.path, { updateSelection: true, skipScroll: false });
-          }
+      if (state.excelWorkbooks?.length) {
+        const books = state.excelWorkbooks;
+        let currentIdx = state.excelWorkbookIndex;
+        if (event.key === "ArrowDown") {
+          currentIdx = currentIdx >= 0 && currentIdx < books.length - 1 ? currentIdx + 1 : 0;
+        } else {
+          currentIdx = currentIdx > 0 ? currentIdx - 1 : books.length - 1;
         }
+        const isStage = Boolean(els.pdfViewer?.classList.contains("stage-active"));
+        if (isStage) {
+          activateExcelWorkbook(currentIdx).catch(showOperationError);
+        } else {
+          state.excelWorkbookIndex = currentIdx;
+          renderExcelWorkbookRail();
+        }
+        const nextBook = books[currentIdx];
+        if (nextBook?.path) {
+          revealPathInTree(nextBook.path, { updateSelection: true, skipScroll: false });
+        }
+        return;
+      }
+      if (state.wordDocs?.length) {
+        const docs = state.wordDocs;
+        let currentIdx = state.wordDocIndex;
+        if (event.key === "ArrowDown") {
+          currentIdx = currentIdx >= 0 && currentIdx < docs.length - 1 ? currentIdx + 1 : 0;
+        } else {
+          currentIdx = currentIdx > 0 ? currentIdx - 1 : docs.length - 1;
+        }
+        const isStage = Boolean(els.pdfViewer?.classList.contains("stage-active"));
+        if (isStage) {
+          activateWordDocument(currentIdx).catch(showOperationError);
+        } else {
+          state.wordDocIndex = currentIdx;
+          renderWordDocumentRail();
+        }
+        const nextDoc = docs[currentIdx];
+        if (nextDoc?.path) {
+          revealPathInTree(nextDoc.path, { updateSelection: true, skipScroll: false });
+        }
+        return;
       }
       return;
     }
