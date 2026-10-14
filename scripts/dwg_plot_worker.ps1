@@ -14,6 +14,12 @@ if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
   exit 1
 }
 
+$InputPath = [System.IO.Path]::GetFullPath($InputPath)
+$OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
+if ($LogFile) {
+  $LogFile = [System.IO.Path]::GetFullPath($LogFile)
+}
+
 if (-not (Test-Path -LiteralPath $OutputDir)) {
   New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 }
@@ -78,14 +84,33 @@ $comProgIds = @(
 
 $app = $null
 $usedProgId = ""
+$isNewInstance = $false
+
+# Сначала проверяем активный экземпляр AutoCAD пользователя (чтобы не плодить дубликаты)
 foreach ($progId in $comProgIds) {
   try {
-    $app = New-Object -ComObject $progId -ErrorAction Stop
+    $app = [System.Runtime.InteropServices.Marshal]::GetActiveObject($progId)
     if ($app) {
       $usedProgId = $progId
+      $isNewInstance = $false
+      Log-Msg "Attached to existing active AutoCAD instance ($progId)"
       break
     }
   } catch {}
+}
+
+if (-not $app) {
+  foreach ($progId in $comProgIds) {
+    try {
+      $app = New-Object -ComObject $progId -ErrorAction Stop
+      if ($app) {
+        $usedProgId = $progId
+        $isNewInstance = $true
+        Log-Msg "Created new AutoCAD COM instance ($progId)"
+        break
+      }
+    } catch {}
+  }
 }
 
 if (-not $app) {
@@ -93,7 +118,9 @@ if (-not $app) {
   exit 1
 }
 
-$app.Visible = $false
+if ($isNewInstance) {
+  try { $app.Visible = $false } catch {}
+}
 $document = $null
 
 try {
@@ -125,7 +152,7 @@ try {
 
   # Сбор всех пространств листа (Layouts)
   $candidateLayouts = @($document.Layouts | Where-Object { -not $_.ModelType } | Sort-Object TabOrder)
-  $nonEmptyLayouts = @($candidateLayouts | Where-Object { $_.Block.Count -gt 1 })
+  $nonEmptyLayouts = @($candidateLayouts | Where-Object { $_.Block.Count -ge 1 })
 
   $layoutMetadata = @()
   foreach ($l in $nonEmptyLayouts) {
@@ -180,46 +207,44 @@ try {
 
   # Функция настройки плоттера листа (с кэшированием устройств)
   function Prepare-LayoutPlotter($layoutObj) {
-    $currentDev = [string]$layoutObj.ConfigName
-    $devices = @($layoutObj.GetPlotDeviceNames())
-    if (-not ($currentDev -and ($devices -contains $currentDev))) {
+    # ВСЕГДА проверяем, что выбран именно PDF-плоттер (физические принтеры вызывают E_INVALIDARG в PlotToFile)
+    $curDev = [string]$layoutObj.ConfigName
+    $isPdfDev = ($curDev -and ($curDev -match "DWG To PDF" -or $curDev -match "AutoCAD PDF" -or $curDev -match "Microsoft Print to PDF"))
+    if (-not $isPdfDev) {
       $preferred = @(
         "DWG To PDF.pc3",
         "AutoCAD PDF (General Documentation).pc3",
         "AutoCAD PDF (High Quality Print).pc3",
+        "AutoCAD PDF (Smallest File).pc3",
         "Microsoft Print to PDF"
       )
       foreach ($dev in $preferred) {
-        if ($devices -contains $dev) {
-          try {
-            $layoutObj.ConfigName = $dev
-            $layoutObj.RefreshPlotDeviceInfo()
-          } catch {}
+        try {
+          $layoutObj.ConfigName = $dev
+          $layoutObj.RefreshPlotDeviceInfo()
           break
-        }
+        } catch {}
       }
     }
 
-    $allMedia = @($layoutObj.GetCanonicalMediaNames())
-    if ($allMedia.Count -gt 0) {
+    try {
+      $allMedia = @($layoutObj.GetCanonicalMediaNames())
       $curMedia = [string]$layoutObj.CanonicalMediaName
-      if (-not ($curMedia -and ($allMedia -contains $curMedia))) {
-        $matched = $null
-        foreach ($code in @("A0", "A1", "A2", "A3", "A4")) {
-          if ($curMedia -match $code) {
-            $matched = @($allMedia | Where-Object { $_ -match $code } | Select-Object -First 1)
-            if ($matched.Count -gt 0) { break }
+      $hasIsoMedia = ($curMedia -and ($curMedia -match "ISO|A3|A4|A2|A1|A0"))
+      if (-not $hasIsoMedia -and $allMedia.Count -gt 0) {
+        $preferredMedia = @(
+          "ISO_full_bleed_A3_(420.00_x_297.00_MM)",
+          "ISO_A3_(420.00_x_297.00_MM)",
+          "ISO_full_bleed_A4_(297.00_x_210.00_MM)",
+          "ISO_A4_(297.00_x_210.00_MM)"
+        )
+        foreach ($pm in $preferredMedia) {
+          if ($allMedia -contains $pm) {
+            try { $layoutObj.CanonicalMediaName = $pm; break } catch {}
           }
         }
-        if ($matched -and $matched.Count -gt 0) {
-          try { $layoutObj.CanonicalMediaName = $matched[0] } catch {}
-        } elseif ($allMedia -contains "ISO_full_bleed_A3_(420.00_x_297.00_MM)") {
-          try { $layoutObj.CanonicalMediaName = "ISO_full_bleed_A3_(420.00_x_297.00_MM)" } catch {}
-        } else {
-          try { $layoutObj.CanonicalMediaName = $allMedia[0] } catch {}
-        }
       }
-    }
+    } catch {}
 
     try { $layoutObj.PlotType = 4 } catch {} # acLayout
     $layoutObj.PlotWithLineweights = $true
@@ -232,8 +257,8 @@ try {
     $name = [string]$layoutObj.Name
     $pdfFile = Join-Path $OutputDir ("page_{0:D4}.pdf" -f $tabOrder)
 
-    # Проверка существующего кэша (RESUME)
-    if ((Test-Path -LiteralPath $pdfFile) -and (Get-Item -LiteralPath $pdfFile).Length -gt 1024) {
+    # Проверка существующего кэша (RESUME, > 4KB исключает пустые/битые файлы)
+    if ((Test-Path -LiteralPath $pdfFile) -and (Get-Item -LiteralPath $pdfFile).Length -gt 4096) {
       $res = @{
         event = "sheet_ready"
         tabOrder = $tabOrder
@@ -254,12 +279,36 @@ try {
 
     Prepare-LayoutPlotter $layoutObj
 
+    # Попытка 1: стандартная печать acLayout
     $swFile = [System.Diagnostics.Stopwatch]::StartNew()
-    $success = $document.Plot.PlotToFile($pdfFile)
+    $success = $false
+    try {
+      $success = $document.Plot.PlotToFile($pdfFile)
+    } catch {
+      Log-Msg "PlotToFile acLayout failed for ${name}: $($_.Exception.Message)"
+    }
+
+    # Резервный шаг: если acLayout не сработал или сгенерировал файл <= 4096 байт
+    # (как в чертежах с рамками вне начала координат, например Остров Первых)
+    $needExtents = (-not $success) -or (-not (Test-Path -LiteralPath $pdfFile)) -or ((Get-Item -LiteralPath $pdfFile).Length -le 4096)
+    if ($needExtents) {
+      try {
+        Log-Msg "Retrying layout $tabOrder ('$name') with acExtents..."
+        $layoutObj.PlotType = 1 # acExtents
+        $layoutObj.CenterPlot = $true
+        $layoutObj.UseStandardScale = $true
+        $layoutObj.StandardScale = 0 # acScaleToFit
+        if (Test-Path -LiteralPath $pdfFile) { Remove-Item -LiteralPath $pdfFile -Force -ErrorAction SilentlyContinue }
+        $success = $document.Plot.PlotToFile($pdfFile)
+      } catch {
+        Log-Msg "PlotToFile acExtents retry failed for ${name}: $($_.Exception.Message)"
+      }
+    }
+
     $plotFileMs = $swFile.ElapsedMilliseconds
     $totalSheetMs = $swPlot.ElapsedMilliseconds
 
-    if ($success -and (Test-Path -LiteralPath $pdfFile) -and (Get-Item -LiteralPath $pdfFile).Length -gt 1024) {
+    if ($success -and (Test-Path -LiteralPath $pdfFile) -and (Get-Item -LiteralPath $pdfFile).Length -gt 4096) {
       $res = @{
         event = "sheet_ready"
         tabOrder = $tabOrder
@@ -350,7 +399,7 @@ try {
 
     $success = $document.Plot.PlotToFile($modelPdf)
     $ms = $swModel.ElapsedMilliseconds
-    if ($success -and (Test-Path -LiteralPath $modelPdf) -and (Get-Item -LiteralPath $modelPdf).Length -gt 1024) {
+    if ($success -and (Test-Path -LiteralPath $modelPdf) -and (Get-Item -LiteralPath $modelPdf).Length -gt 4096) {
       $res = @{
         event = "sheet_ready"
         tabOrder = 0
@@ -381,8 +430,10 @@ try {
     try { $document.Close($false) } catch {}
     try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($document) | Out-Null } catch {}
   }
-  if ($app) {
+  if ($app -and $isNewInstance) {
     try { $app.Quit() } catch {}
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null } catch {}
+  } elseif ($app) {
     try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null } catch {}
   }
   [System.GC]::Collect()

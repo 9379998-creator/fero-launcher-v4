@@ -3629,12 +3629,13 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     # На лету проверяем готовые PDF от AutoCAD и нарезаем недостающие PNG
                     for pdf_file in target_dir.glob("page_*.pdf"):
                         m_pdf = re.match(r"^page_(\d+)\.pdf$", pdf_file.name)
-                        if m_pdf and pdf_file.stat().st_size > 1024:
+                        if m_pdf and pdf_file.stat().st_size > 4096:
                             tab = int(m_pdf.group(1))
                             png_p = target_dir / f"page-{tab}.png"
-                            if not png_p.exists() or png_p.stat().st_size == 0:
+                            need_raster = (not png_p.exists()) or (png_p.stat().st_size < 35000) or (png_p.stat().st_mtime < pdf_file.stat().st_mtime)
+                            if need_raster:
                                 try:
-                                    _rasterize_pdf_page(pdf_file, png_p, DEFAULT_PDF_DPI)
+                                    _rasterize_pdf_page(pdf_file, png_p, DWG_PREVIEW_DPI)
                                 except Exception as rx:
                                     self.log_message(f"Rasterize error for {pdf_file.name}: {rx}")
 
@@ -3789,7 +3790,54 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if suffix in {".gsheet", ".gdoc", ".gslides"}:
                     raise ValueError("Это облачный документ Google. Откройте его через браузер (Google Docs / Sheets).")
                 action = str(body.get("action", "") or "default").strip().lower()
-                if action == "explorer":
+
+                if suffix == ".dwg" and action not in ("explorer", "system"):
+                    # Остановка фонового воркера рендеринга, чтобы избежать блокировки файла
+                    try:
+                        from app.backend.dwg_engine import DwgOnDemandManager
+                        DwgOnDemandManager.stop_worker(target)
+                    except Exception:
+                        pass
+
+                    # Проверяем, запущен ли уже AutoCAD: если да, активируем окно и открываем документ
+                    # через COM в том же экземпляре, предотвращая двойной запуск процесса acad.exe
+                    acad_opened = False
+                    if os.name == "nt":
+                        try:
+                            import win32com.client
+                            acad = win32com.client.GetActiveObject("AutoCAD.Application")
+                            if acad:
+                                acad.Visible = True
+                                try:
+                                    acad.WindowState = 3  # acMax
+                                except Exception:
+                                    pass
+                                doc_already_open = False
+                                try:
+                                    target_str = str(target.resolve()).casefold()
+                                    for doc in acad.Documents:
+                                        if str(Path(doc.FullName).resolve()).casefold() == target_str:
+                                            doc.Activate()
+                                            doc_already_open = True
+                                            break
+                                except Exception:
+                                    pass
+                                if not doc_already_open:
+                                    try:
+                                        acad.Documents.Open(str(target))
+                                    except Exception:
+                                        pass
+                                bring_native_window_to_front(0, "acad.exe")
+                                _bring_window_to_front(None, None, 120.0, target.name, 3)
+                                acad_opened = True
+                        except Exception:
+                            acad_opened = False
+
+                    if acad_opened:
+                        mode = "autocad-active-com"
+                    else:
+                        mode = launch_native_file(target)
+                elif action == "explorer":
                     mode = open_in_explorer(target)
                 elif action == "system":
                     mode = launch_system_default(target)

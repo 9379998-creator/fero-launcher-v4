@@ -3203,9 +3203,13 @@ function updatePagePosition(page, currentDpiInfo = null) {
   let dpiLabel = "";
   if (currentDpiInfo) {
     dpiLabel = ` · ${currentDpiInfo}`;
-  } else if (natW && natH) {
-    const dpi = natW > 2000 ? 300 : (natW > 1000 ? 150 : 72);
-    dpiLabel = ` · ${dpi} DPI (${natW}×${natH} px)`;
+  } else {
+    const dpi = page?.dpi || state.viewerDpi || 150;
+    if (natW && natH) {
+      dpiLabel = ` · ${dpi} DPI (${natW}×${natH} px)`;
+    } else {
+      dpiLabel = ` · ${dpi} DPI`;
+    }
   }
   els.pagePosition.textContent = `${pageText}${dpiLabel}`.trim();
 }
@@ -3242,13 +3246,14 @@ function extOfPath(path) {
 
 function updateViewerDpiButton(loading = false) {
   if (!els.viewToggleDpi) return;
-  const is300 = state.viewerDpi === 300;
-  els.viewToggleDpi.textContent = loading ? `${state.viewerDpi} DPI…` : `${state.viewerDpi} DPI`;
-  els.viewToggleDpi.classList.toggle("dpi-300", is300);
+  const dpi = state.viewerDpi || 150;
+  els.viewToggleDpi.textContent = loading ? `${dpi} DPI…` : `${dpi} DPI`;
+  els.viewToggleDpi.classList.toggle("dpi-300", dpi === 300);
+  els.viewToggleDpi.classList.toggle("dpi-150", dpi === 150);
+  els.viewToggleDpi.classList.toggle("dpi-72", dpi === 72);
   els.viewToggleDpi.classList.toggle("loading", loading);
-  els.viewToggleDpi.title = is300
-    ? "Качество листа: 300 DPI (сверхчёткость). Нажмите для переключения на 150 DPI"
-    : "Качество листа: 150 DPI (по умолчанию). Нажмите для переключения на 300 DPI";
+  const nextDpi = dpi === 72 ? 150 : (dpi === 150 ? 300 : 72);
+  els.viewToggleDpi.title = `Разрешение окна: ${dpi} DPI. Нажмите для переключения на ${nextDpi} DPI (режимы 72 → 150 → 300)`;
 }
 
 let activeHighQualityController = null;
@@ -3304,6 +3309,7 @@ async function requestHighQualityPage(page, targetDpi = (state.viewerDpi || 150)
       els.pdfPageImage.src = freshUrl;
       els.pdfPageImage.onload = () => {
         applyPageView();
+        updatePagePosition(highPage);
       };
     }
     // Также сразу обновляем миниатюру в ленте при успешном ответе
@@ -4704,7 +4710,8 @@ els.viewZoomIn.addEventListener("click", () => zoomPdf(1.22));
 if (els.viewToggleDpi) {
   els.viewToggleDpi.addEventListener("click", (e) => {
     e.stopPropagation();
-    state.viewerDpi = state.viewerDpi === 300 ? 150 : 300;
+    const cur = state.viewerDpi || 150;
+    state.viewerDpi = cur === 72 ? 150 : (cur === 150 ? 300 : 72);
     try {
       localStorage.setItem("launcher_viewer_dpi", String(state.viewerDpi));
     } catch (_) {}

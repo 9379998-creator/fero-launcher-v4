@@ -1407,6 +1407,14 @@ textarea:focus {
   box-shadow: 0 0 6px rgba(0, 122, 204, 0.4);
 }
 
+.view-dpi-btn.dpi-150 {
+  border-color: rgba(0, 122, 204, 0.5);
+}
+
+.view-dpi-btn.dpi-72 {
+  opacity: 0.85;
+}
+
 .view-dpi-btn.loading {
   opacity: 0.6;
   cursor: wait;

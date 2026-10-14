@@ -597,9 +597,9 @@ def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, inpu
                 elif ev.get("event") == "sheet_ready":
                     tab = int(ev.get("tabOrder", 0))
                     pdf_p = Path(ev.get("pdfPath", ""))
-                    if pdf_p.is_file():
+                    if pdf_p.is_file() and pdf_p.stat().st_size > 4096:
                         png_p = output_dir / f"page-{tab}.png"
-                        if not png_p.exists() or png_p.stat().st_size == 0:
+                        if not png_p.exists() or png_p.stat().st_size < 35000 or png_p.stat().st_mtime < pdf_p.stat().st_mtime:
                             _rasterize_pdf_page(pdf_p, png_p, dpi)
             except Exception:
                 pass
@@ -613,10 +613,10 @@ def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, inpu
             try:
                 for pdf_p in output_dir.glob("page_*.pdf"):
                     m = re.match(r"^page_(\d+)\.pdf$", pdf_p.name)
-                    if m and pdf_p.stat().st_size > 1024:
+                    if m and pdf_p.stat().st_size > 4096:
                         tab = int(m.group(1))
                         png_p = output_dir / f"page-{tab}.png"
-                        if not png_p.exists() or png_p.stat().st_size == 0:
+                        if not png_p.exists() or png_p.stat().st_size < 35000 or png_p.stat().st_mtime < pdf_p.stat().st_mtime:
                             _rasterize_pdf_page(pdf_p, png_p, dpi)
             except Exception:
                 pass
@@ -624,10 +624,10 @@ def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, inpu
         try:
             for pdf_p in output_dir.glob("page_*.pdf"):
                 m = re.match(r"^page_(\d+)\.pdf$", pdf_p.name)
-                if m and pdf_p.stat().st_size > 1024:
+                if m and pdf_p.stat().st_size > 4096:
                     tab = int(m.group(1))
                     png_p = output_dir / f"page-{tab}.png"
-                    if not png_p.exists() or png_p.stat().st_size == 0:
+                    if not png_p.exists() or png_p.stat().st_size < 35000 or png_p.stat().st_mtime < pdf_p.stat().st_mtime:
                         _rasterize_pdf_page(pdf_p, png_p, dpi)
         except Exception:
             pass
@@ -754,11 +754,11 @@ def render_dwg_model_progressive(
     deadline = time.time() + wait_first_sheet_seconds
     page1_ready = False
     while time.time() < deadline:
-        if page1_pdf.exists() and page1_pdf.stat().st_size > 1024:
+        if page1_pdf.exists() and page1_pdf.stat().st_size > 4096:
             page1_ready = True
             break
         if proc and proc.poll() is not None:
-            if page1_pdf.exists() and page1_pdf.stat().st_size > 1024:
+            if page1_pdf.exists() and page1_pdf.stat().st_size > 4096:
                 page1_ready = True
             break
         time.sleep(0.5)
@@ -834,16 +834,19 @@ def render_dwg_page_progressive(
     dpi: int = 150,
     wait_seconds: float = 12.0,
 ) -> Dict[str, Any]:
-    """Прогрессивный возврат конкретной страницы чертежа DWG."""
-    png_path = target_dir / f"page-{page}.png"
+    """Прогрессивный возврат конкретной страницы чертежа DWG с поддержкой DPI (72, 150, 300)."""
+    dpi_suffix = "" if dpi == 150 else f"@{dpi}"
+    png_name = f"page-{page}{dpi_suffix}.png"
+    png_path = target_dir / png_name
     pdf_path = target_dir / f"page_{page:04d}.pdf"
     thumb_path = target_dir / "header_thumb.png"
 
-    if png_path.exists() and png_path.stat().st_size > 0:
+    # 1. Если для данного DPI уже есть готовый полноценный PNG (> 35KB исключает thumbnail)
+    if png_path.exists() and png_path.stat().st_size > 35000:
         item = {
             "page": page,
             "name": f"{file_path.name} · стр. {page}",
-            "url": f"/cache/dwg/{cache_key}/{png_path.name}",
+            "url": f"/cache/dwg/{cache_key}/{png_name}",
             "bytes": png_path.stat().st_size,
             "previewType": "DWG_MODEL",
         }
@@ -863,13 +866,14 @@ def render_dwg_page_progressive(
             "convertCacheHit": True,
         }
 
-    if pdf_path.exists() and pdf_path.stat().st_size > 1024:
+    # 2. Если PDF готов (> 4096 байт), сразу растрируем в запрошенный DPI
+    if pdf_path.exists() and pdf_path.stat().st_size > 4096:
         _rasterize_pdf_page(pdf_path, png_path, dpi)
         if png_path.exists() and png_path.stat().st_size > 0:
             item = {
                 "page": page,
                 "name": f"{file_path.name} · стр. {page}",
-                "url": f"/cache/dwg/{cache_key}/{png_path.name}",
+                "url": f"/cache/dwg/{cache_key}/{png_name}",
                 "bytes": png_path.stat().st_size,
                 "previewType": "DWG_MODEL",
             }
@@ -879,7 +883,7 @@ def render_dwg_page_progressive(
                 "dpi": dpi,
                 "page": page,
                 "cacheKey": cache_key,
-                "cacheHit": True,
+                "cacheHit": False,
                 "item": item,
                 "url": item["url"],
                 "bytes": item["bytes"],
@@ -889,16 +893,21 @@ def render_dwg_page_progressive(
                 "convertCacheHit": True,
             }
 
-    # Ожидание допечки листа фоновым воркером
+    # 3. При необходимости запускаем/ускоряем воркер на нужный лист
+    proc = DwgOnDemandManager.get_or_start_worker(file_path, target_dir, priority_tab=page)
+    if proc:
+        _start_background_worker_pump(proc, target_dir, file_path, dpi)
+
+    # 4. Ожидание допечки листа фоновым воркером
     deadline = time.time() + wait_seconds
     while time.time() < deadline:
-        if pdf_path.exists() and pdf_path.stat().st_size > 1024:
+        if pdf_path.exists() and pdf_path.stat().st_size > 4096:
             _rasterize_pdf_page(pdf_path, png_path, dpi)
             if png_path.exists() and png_path.stat().st_size > 0:
                 item = {
                     "page": page,
                     "name": f"{file_path.name} · стр. {page}",
-                    "url": f"/cache/dwg/{cache_key}/{png_path.name}",
+                    "url": f"/cache/dwg/{cache_key}/{png_name}",
                     "bytes": png_path.stat().st_size,
                     "previewType": "DWG_MODEL",
                 }
