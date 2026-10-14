@@ -47,7 +47,12 @@ temp/
 
 # Local research & isolated test paths
 .local-research/
+scratch/
+runtime/tools/
+*_ab143b992d3f/
+*_46c564db6d68/
 
 # OS
 .DS_Store
 Thumbs.db
+

@@ -1185,45 +1185,16 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     if not path.is_file() or path.suffix.casefold() != ".dwg":
         raise ValueError(f"Это не DWG-файл: {path}")
 
-    # 1. Проверяем, есть ли уже готовый векторный PDF в изолированном кэше
     key = file_cache_key(path, "dwg-smart-cad-v3")
     target_dir = DWG_CACHE_DIR / key
     target_dir.mkdir(parents=True, exist_ok=True)
-    cache_pdf = target_dir / f"{path.stem}.pdf"
-    manifest_path = target_dir / "manifest.json"
-    has_cached_pdf = False
-    if cache_pdf.exists() and cache_pdf.stat().st_size > 1024 and manifest_path.exists():
-        try:
-            m = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if (
-                m.get("sourcePath") == str(path)
-                and m.get("isComplete") is True
-                and m.get("sourceMtimeNs") == path.stat().st_mtime_ns
-                and m.get("sourceSize") == path.stat().st_size
-            ):
-                has_cached_pdf = True
-        except (OSError, json.JSONDecodeError):
-            pass
 
-    # Если векторного PDF нет, но в кэше лежат старые растровые картинки — очищаем их
-    if not has_cached_pdf:
-        for stale_png in target_dir.glob("page-*.png"):
-            try:
-                stale_png.unlink()
-            except OSError:
-                pass
+    try:
+        from app.backend.dwg_engine import render_dwg_model_progressive
+    except ImportError:
+        from dwg_engine import render_dwg_model_progressive
 
-    # 2. Рендерим качественную модель DWG через векторный PDF (экспорт или печать)
-    pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
-    document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
-    document["name"] = path.name
-    document["sourcePath"] = str(path)
-    document["sourceName"] = path.name
-    document["sourceType"] = "DWG"
-    document["convertedPdfPath"] = str(pdf_path)
-    document["convertCacheHit"] = convert_cache_hit
-    document["previewMode"] = "cad-smart-layouts"
-    return document
+    return render_dwg_model_progressive(path=path, target_dir=target_dir, cache_key=key, dpi=dpi)
 
 def set_windows_clipboard(text: str) -> bool:
     if os.name != "nt":
@@ -3620,31 +3591,16 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if not raw_file:
                     raise ValueError("Не выбран DWG-файл для отображения")
                 file_path = Path(raw_file)
-                key = file_cache_key(file_path, "dwg-smart-cad-v2")
-                cached_png = DWG_CACHE_DIR / key / f"page-{page}.png"
-                manifest_file = DWG_CACHE_DIR / key / "manifest.json"
-                if cached_png.exists() and cached_png.stat().st_size > 0 and manifest_file.exists():
-                    self.send_json(
-                        HTTPStatus.OK,
-                        {
-                            "page": page,
-                            "name": f"{file_path.name} · стр. {page}",
-                            "url": f"/cache/dwg/{key}/{cached_png.name}",
-                            "bytes": cached_png.stat().st_size,
-                            "cacheHit": True,
-                            "sourcePath": raw_file,
-                            "sourceType": "DWG",
-                            "convertedPdfPath": "",
-                            "convertCacheHit": True,
-                        },
-                    )
-                    return
-                pdf_path, convert_cache_hit = dwg_to_model_pdf(file_path)
-                payload = render_pdf_page(pdf_path, page=page, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
-                payload["sourcePath"] = raw_file
-                payload["sourceType"] = "DWG"
-                payload["convertedPdfPath"] = str(pdf_path)
-                payload["convertCacheHit"] = convert_cache_hit
+                key = file_cache_key(file_path, "dwg-smart-cad-v3")
+                target_dir = DWG_CACHE_DIR / key
+                target_dir.mkdir(parents=True, exist_ok=True)
+
+                try:
+                    from app.backend.dwg_engine import render_dwg_page_progressive
+                except ImportError:
+                    from dwg_engine import render_dwg_page_progressive
+
+                payload = render_dwg_page_progressive(file_path=file_path, target_dir=target_dir, cache_key=key, page=page, dpi=dpi)
                 self.send_json(HTTPStatus.OK, payload)
             except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})

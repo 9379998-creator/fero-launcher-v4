@@ -18,10 +18,13 @@ import json
 import logging
 import os
 import struct
+import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger("dwg_engine")
 
 # 16-байтный сигнатурный маркер Autodesk для таблицы растровых изображений в заголовке DWG
@@ -465,6 +468,339 @@ def get_dwg_layout_preview(
         "image_bytes": b64_str if as_base64 else raw_bytes,
         "image_base64": b64_str,
         "elapsed_ms": round(elapsed_ms, 4),
+    }
+
+
+def _rasterize_pdf_page(pdf_path: Path, out_png: Path, dpi: int = 150) -> bool:
+    """Конвертирует первую страницу PDF в PNG через PyMuPDF (fitz)."""
+    try:
+        import fitz
+
+        with fitz.open(str(pdf_path)) as doc:
+            if len(doc) > 0:
+                page = doc[0]
+                pix = page.get_pixmap(dpi=dpi)
+                out_png.parent.mkdir(parents=True, exist_ok=True)
+                pix.save(str(out_png))
+                return True
+    except Exception as e:
+        logger.warning("Ошибка растеризации %s в %s: %s", pdf_path, out_png, e)
+    return False
+
+
+class DwgOnDemandManager:
+    """Менеджер фоновых воркеров печати DWG."""
+    _lock = threading.Lock()
+    _active_workers: Dict[str, subprocess.Popen] = {}
+
+    @classmethod
+    def get_or_start_worker(cls, input_dwg: Path, output_dir: Path, priority_tab: int = 1) -> Optional[subprocess.Popen]:
+        key = str(input_dwg.resolve()).casefold()
+        with cls._lock:
+            existing = cls._active_workers.get(key)
+            if existing is not None:
+                if existing.poll() is None:
+                    return existing
+                cls._active_workers.pop(key, None)
+
+            worker_script = REPO_ROOT / "scripts" / "dwg_plot_worker.ps1"
+            if not worker_script.is_file():
+                logger.error("Скрипт dwg_plot_worker.ps1 не найден: %s", worker_script)
+                return None
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(worker_script),
+                "-InputPath",
+                str(input_dwg),
+                "-OutputDir",
+                str(output_dir),
+                "-PriorityTabOrder",
+                str(priority_tab),
+            ]
+
+            creation_flags = 0
+            if os.name == "nt":
+                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    creationflags=creation_flags,
+                )
+                cls._active_workers[key] = proc
+                return proc
+            except Exception as e:
+                logger.error("Не удалось запустить воркер для %s: %s", input_dwg, e)
+                return None
+
+
+def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, dpi: int = 150) -> None:
+    """Фоновый поток для вычитывания stdout воркера и автоматической нарезки PDF->PNG."""
+    def _pump():
+        if not proc.stdout:
+            return
+        for line in proc.stdout:
+            line_str = line.strip()
+            if not line_str or not (line_str.startswith("{") and line_str.endswith("}")):
+                continue
+            try:
+                ev = json.loads(line_str)
+                if ev.get("event") == "sheet_ready":
+                    tab = int(ev.get("tabOrder", 0))
+                    pdf_p = Path(ev.get("pdfPath", ""))
+                    if pdf_p.is_file():
+                        png_p = output_dir / f"page-{tab}.png"
+                        _rasterize_pdf_page(pdf_p, png_p, dpi)
+            except Exception:
+                pass
+        try:
+            proc.wait()
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_pump, daemon=True, name=f"dwg_pump_{output_dir.name}")
+    t.start()
+
+
+def render_dwg_model_progressive(
+    path: Path,
+    target_dir: Path,
+    cache_key: str,
+    dpi: int = 150,
+    wait_first_sheet_seconds: float = 75.0,
+) -> Dict[str, Any]:
+    """Прогрессивный рендеринг DWG-модели: немедленный возврат листа 1 и фоновая печать остальных."""
+    path = path.resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = target_dir / "manifest.json"
+    page1_pdf = target_dir / "page_0001.pdf"
+    page1_png = target_dir / "page-1.png"
+    thumb_png = target_dir / "header_thumb.png"
+
+    # 1. Быстрая проверка готового кэша
+    if manifest_path.exists() and manifest_path.stat().st_size > 0:
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (
+                manifest.get("sourcePath") == str(path)
+                and manifest.get("sourceSize") == path.stat().st_size
+                and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
+            ):
+                if not page1_png.exists() and page1_pdf.exists():
+                    _rasterize_pdf_page(page1_pdf, page1_png, dpi)
+
+                layouts = manifest.get("layouts", [])
+                items = []
+                for lay in layouts:
+                    tab = int(lay.get("tabOrder", 1))
+                    p_png = target_dir / f"page-{tab}.png"
+                    p_pdf = target_dir / f"page_{tab:04d}.pdf"
+                    if not p_png.exists() and p_pdf.exists() and tab <= 5:
+                        _rasterize_pdf_page(p_pdf, p_png, dpi)
+                    items.append({
+                        "page": tab,
+                        "name": f"{path.name} · {lay.get('name', f'Лист {tab}')}",
+                        "url": f"/cache/dwg/{cache_key}/{p_png.name}",
+                        "bytes": p_png.stat().st_size if p_png.exists() else 0,
+                    })
+
+                if not items and page1_png.exists():
+                    items.append({
+                        "page": 1,
+                        "name": f"{path.name} · Лист 1",
+                        "url": f"/cache/dwg/{cache_key}/{page1_png.name}",
+                        "bytes": page1_png.stat().st_size if page1_png.exists() else 0,
+                    })
+
+                return {
+                    "name": path.name,
+                    "path": str(path),
+                    "sourcePath": str(path),
+                    "sourceName": path.name,
+                    "sourceType": "DWG",
+                    "dpi": dpi,
+                    "pages": len(layouts) if layouts else 1,
+                    "renderedPages": len([it for it in items if it["bytes"] > 0]),
+                    "cacheKey": cache_key,
+                    "cacheHit": True,
+                    "cacheHitPages": len([it for it in items if it["bytes"] > 0]),
+                    "newRenderedPages": 0,
+                    "errors": [],
+                    "items": items,
+                    "status": "ok",
+                    "convertedPdfPath": str(page1_pdf) if page1_pdf.exists() else "",
+                    "convertCacheHit": True,
+                    "previewMode": "cad-smart-layouts",
+                }
+        except Exception as ex:
+            logger.warning("Ошибка чтения манифеста для %s: %s", path, ex)
+
+    # 2. Фаза 0: Мгновенное извлечение превью из заголовка DWG (< 1 мс)
+    if not thumb_png.exists():
+        thumb_res = extract_raw_thumbnail_from_dwg(path)
+        if thumb_res:
+            thumb_png.write_bytes(thumb_res[0])
+        else:
+            thumb_png.write_bytes(_generate_placeholder_png(path.name, "Model"))
+
+    # 3. Запуск On-Demand AutoCAD воркера с приоритетом на лист 1
+    proc = DwgOnDemandManager.get_or_start_worker(path, target_dir, priority_tab=1)
+    if proc:
+        _start_background_worker_pump(proc, target_dir, dpi)
+
+    # Ожидание готовности листа 1
+    deadline = time.time() + wait_first_sheet_seconds
+    page1_ready = False
+    while time.time() < deadline:
+        if page1_pdf.exists() and page1_pdf.stat().st_size > 1024:
+            page1_ready = True
+            break
+        if proc and proc.poll() is not None:
+            if page1_pdf.exists() and page1_pdf.stat().st_size > 1024:
+                page1_ready = True
+            break
+        time.sleep(0.5)
+
+    if page1_ready:
+        _rasterize_pdf_page(page1_pdf, page1_png, dpi)
+    elif not page1_png.exists() and thumb_png.exists():
+        page1_png.write_bytes(thumb_png.read_bytes())
+
+    # Сбор метаданных листов из manifest.json
+    layouts = []
+    if manifest_path.exists():
+        try:
+            m = json.loads(manifest_path.read_text(encoding="utf-8"))
+            layouts = m.get("layouts", [])
+        except Exception:
+            pass
+
+    items = []
+    if layouts:
+        for lay in layouts:
+            tab = int(lay.get("tabOrder", 1))
+            p_png = target_dir / f"page-{tab}.png"
+            items.append({
+                "page": tab,
+                "name": f"{path.name} · {lay.get('name', f'Лист {tab}')}",
+                "url": f"/cache/dwg/{cache_key}/{p_png.name}",
+                "bytes": p_png.stat().st_size if p_png.exists() else 0,
+            })
+    else:
+        items.append({
+            "page": 1,
+            "name": f"{path.name} · Лист 1",
+            "url": f"/cache/dwg/{cache_key}/{page1_png.name}",
+            "bytes": page1_png.stat().st_size if page1_png.exists() else 0,
+        })
+
+    return {
+        "name": path.name,
+        "path": str(path),
+        "sourcePath": str(path),
+        "sourceName": path.name,
+        "sourceType": "DWG",
+        "dpi": dpi,
+        "pages": len(layouts) if layouts else 1,
+        "renderedPages": len([it for it in items if it["bytes"] > 0]),
+        "cacheKey": cache_key,
+        "cacheHit": False,
+        "cacheHitPages": len([it for it in items if it["bytes"] > 0]),
+        "newRenderedPages": 1 if page1_ready else 0,
+        "errors": [],
+        "items": items,
+        "status": "ok",
+        "convertedPdfPath": str(page1_pdf) if page1_pdf.exists() else "",
+        "convertCacheHit": False,
+        "previewMode": "cad-smart-layouts",
+    }
+
+
+def render_dwg_page_progressive(
+    file_path: Path,
+    target_dir: Path,
+    cache_key: str,
+    page: int,
+    dpi: int = 150,
+    wait_seconds: float = 12.0,
+) -> Dict[str, Any]:
+    """Прогрессивный возврат конкретной страницы чертежа DWG."""
+    png_path = target_dir / f"page-{page}.png"
+    pdf_path = target_dir / f"page_{page:04d}.pdf"
+    thumb_path = target_dir / "header_thumb.png"
+
+    if png_path.exists() and png_path.stat().st_size > 0:
+        return {
+            "page": page,
+            "name": f"{file_path.name} · стр. {page}",
+            "url": f"/cache/dwg/{cache_key}/{png_path.name}",
+            "bytes": png_path.stat().st_size,
+            "cacheHit": True,
+            "sourcePath": str(file_path),
+            "sourceType": "DWG",
+            "convertedPdfPath": str(pdf_path) if pdf_path.exists() else "",
+            "convertCacheHit": True,
+        }
+
+    if pdf_path.exists() and pdf_path.stat().st_size > 1024:
+        _rasterize_pdf_page(pdf_path, png_path, dpi)
+        if png_path.exists() and png_path.stat().st_size > 0:
+            return {
+                "page": page,
+                "name": f"{file_path.name} · стр. {page}",
+                "url": f"/cache/dwg/{cache_key}/{png_path.name}",
+                "bytes": png_path.stat().st_size,
+                "cacheHit": True,
+                "sourcePath": str(file_path),
+                "sourceType": "DWG",
+                "convertedPdfPath": str(pdf_path),
+                "convertCacheHit": True,
+            }
+
+    # Ожидание допечки листа фоновым воркером
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        if pdf_path.exists() and pdf_path.stat().st_size > 1024:
+            _rasterize_pdf_page(pdf_path, png_path, dpi)
+            if png_path.exists() and png_path.stat().st_size > 0:
+                return {
+                    "page": page,
+                    "name": f"{file_path.name} · стр. {page}",
+                    "url": f"/cache/dwg/{cache_key}/{png_path.name}",
+                    "bytes": png_path.stat().st_size,
+                    "cacheHit": False,
+                    "sourcePath": str(file_path),
+                    "sourceType": "DWG",
+                    "convertedPdfPath": str(pdf_path),
+                    "convertCacheHit": False,
+                }
+        time.sleep(0.5)
+
+    # Если лист еще рендерится, возвращаем превью заголовка
+    fallback_url = f"/cache/dwg/{cache_key}/header_thumb.png" if thumb_path.exists() else f"/cache/dwg/{cache_key}/page-1.png"
+    return {
+        "page": page,
+        "name": f"{file_path.name} · стр. {page} (Рендерится...)",
+        "url": fallback_url,
+        "bytes": thumb_path.stat().st_size if thumb_path.exists() else 1024,
+        "cacheHit": False,
+        "rendering": True,
+        "sourcePath": str(file_path),
+        "sourceType": "DWG",
+        "convertedPdfPath": "",
+        "convertCacheHit": False,
     }
 
 
