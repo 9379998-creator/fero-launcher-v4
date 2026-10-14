@@ -156,11 +156,13 @@ try {
   $manifestFile = Join-Path $OutputDir "manifest.json"
   try {
     $itemStat = Get-Item -LiteralPath $InputPath
+    $epoch = [datetime]'1970-01-01 00:00:00Z'
+    $mtimeSec = [int64]($itemStat.LastWriteTimeUtc - $epoch).TotalSeconds
     $manifestData = [ordered]@{
       sourcePath = $InputPath
       sourceName = [System.IO.Path]::GetFileName($InputPath)
       sourceSize = $itemStat.Length
-      sourceMtimeNs = $itemStat.LastWriteTimeUtc.Ticks * 100
+      sourceMtime = $mtimeSec
       outputDir = $OutputDir
       isComplete = $false
       totalLayouts = $candidateLayouts.Count
@@ -168,7 +170,8 @@ try {
       layouts = $layoutMetadata
       completedPages = @{}
     }
-    Set-Content -LiteralPath $manifestFile -Value ($manifestData | ConvertTo-Json -Depth 5) -Encoding UTF8
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($manifestFile, ($manifestData | ConvertTo-Json -Depth 5), $utf8NoBom)
   } catch {}
 
   if ($ListOnly) {
@@ -279,7 +282,8 @@ try {
             pdf = $pdfFile
             elapsedMs = $totalSheetMs
           }) -Force
-          Set-Content -LiteralPath $manifestFile -Value ($mf | ConvertTo-Json -Depth 5) -Encoding UTF8
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::WriteAllText($manifestFile, ($mf | ConvertTo-Json -Depth 5), $utf8NoBom)
         }
       } catch {}
     } else {
@@ -366,7 +370,8 @@ try {
     if ($manifestFile -and (Test-Path -LiteralPath $manifestFile)) {
       $mf = Get-Content -LiteralPath $manifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
       $mf.isComplete = $true
-      Set-Content -LiteralPath $manifestFile -Value ($mf | ConvertTo-Json -Depth 5) -Encoding UTF8
+      $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+      [System.IO.File]::WriteAllText($manifestFile, ($mf | ConvertTo-Json -Depth 5), $utf8NoBom)
     }
   } catch {}
   Write-Output (@{ event = "complete"; totalTimeMs = $swOpen.ElapsedMilliseconds } | ConvertTo-Json -Compress)

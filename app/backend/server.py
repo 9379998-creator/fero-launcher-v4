@@ -3845,6 +3845,28 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         if not target.exists() or not target.is_file():
+            if relative.startswith("dwg/"):
+                parts = relative.split("/")
+                if len(parts) == 3:
+                    import re
+                    match = re.match(r"^page-(\d+)\.png$", parts[2])
+                    if match:
+                        page_num = int(match.group(1))
+                        pdf_candidate = target.parent / f"page_{page_num:04d}.pdf"
+                        deadline = time.time() + 30.0
+                        while time.time() < deadline:
+                            if target.exists() and target.is_file() and target.stat().st_size > 0:
+                                break
+                            if pdf_candidate.exists() and pdf_candidate.stat().st_size > 1024:
+                                try:
+                                    from app.backend.dwg_engine import _rasterize_pdf_page
+                                except ImportError:
+                                    from dwg_engine import _rasterize_pdf_page
+                                _rasterize_pdf_page(pdf_candidate, target, DEFAULT_PDF_DPI)
+                                if target.exists() and target.stat().st_size > 0:
+                                    break
+                            time.sleep(0.5)
+
             if relative.startswith("pdf/"):
                 parts = relative.split("/")
                 if len(parts) == 3:

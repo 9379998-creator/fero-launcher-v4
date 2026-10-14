@@ -492,10 +492,43 @@ class DwgOnDemandManager:
     """Менеджер фоновых воркеров печати DWG."""
     _lock = threading.Lock()
     _active_workers: Dict[str, subprocess.Popen] = {}
+    _worker_layouts: Dict[str, List[Dict[str, Any]]] = {}
+
+    @classmethod
+    def _worker_key(cls, path: Union[str, Path]) -> str:
+        return str(Path(path).resolve()).casefold()
+
+    @classmethod
+    def set_layouts(cls, path: Union[str, Path], layouts: List[Dict[str, Any]]) -> None:
+        key = cls._worker_key(path)
+        with cls._lock:
+            cls._worker_layouts[key] = layouts
+
+    @classmethod
+    def get_layouts(cls, path: Union[str, Path]) -> List[Dict[str, Any]]:
+        key = cls._worker_key(path)
+        with cls._lock:
+            return cls._worker_layouts.get(key, [])
+
+    @classmethod
+    def stop_worker(cls, path: Union[str, Path]) -> None:
+        key = cls._worker_key(path)
+        with cls._lock:
+            proc = cls._active_workers.pop(key, None)
+            if proc:
+                try:
+                    if proc.poll() is None:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=1.5)
+                        except Exception:
+                            proc.kill()
+                except Exception:
+                    pass
 
     @classmethod
     def get_or_start_worker(cls, input_dwg: Path, output_dir: Path, priority_tab: int = 1) -> Optional[subprocess.Popen]:
-        key = str(input_dwg.resolve()).casefold()
+        key = cls._worker_key(input_dwg)
         with cls._lock:
             existing = cls._active_workers.get(key)
             if existing is not None:
@@ -546,7 +579,7 @@ class DwgOnDemandManager:
                 return None
 
 
-def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, dpi: int = 150) -> None:
+def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, input_dwg: Path, dpi: int = 150) -> None:
     """Фоновый поток для вычитывания stdout воркера и автоматической нарезки PDF->PNG."""
     def _pump():
         if not proc.stdout:
@@ -557,7 +590,11 @@ def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, dpi:
                 continue
             try:
                 ev = json.loads(line_str)
-                if ev.get("event") == "sheet_ready":
+                if ev.get("event") == "doc_opened":
+                    lays = ev.get("layouts", [])
+                    if lays:
+                        DwgOnDemandManager.set_layouts(input_dwg, lays)
+                elif ev.get("event") == "sheet_ready":
                     tab = int(ev.get("tabOrder", 0))
                     pdf_p = Path(ev.get("pdfPath", ""))
                     if pdf_p.is_file():
@@ -603,12 +640,13 @@ def render_dwg_model_progressive(
     # 1. Быстрая проверка готового кэша (если не force)
     if not force and manifest_path.exists() and manifest_path.stat().st_size > 0:
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if (
-                manifest.get("sourcePath") == str(path)
-                and manifest.get("sourceSize") == path.stat().st_size
-                and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
-            ):
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+            source_size = manifest.get("sourceSize")
+            source_mtime = manifest.get("sourceMtime")
+            is_valid = manifest.get("sourcePath") == str(path) and source_size == path.stat().st_size
+            if is_valid and source_mtime:
+                is_valid = abs(float(source_mtime) - path.stat().st_mtime) < 3.0
+            if is_valid:
                 if not page1_png.exists() and page1_pdf.exists():
                     _rasterize_pdf_page(page1_pdf, page1_png, dpi)
 
@@ -643,7 +681,7 @@ def render_dwg_model_progressive(
                     "sourceType": "DWG",
                     "dpi": dpi,
                     "pages": len(layouts) if layouts else 1,
-                    "renderedPages": len([it for it in items if it["bytes"] > 0]),
+                    "renderedPages": len(layouts) if layouts else 1,
                     "cacheKey": cache_key,
                     "cacheHit": True,
                     "cacheHitPages": len([it for it in items if it["bytes"] > 0]),
@@ -669,7 +707,7 @@ def render_dwg_model_progressive(
     # 3. Запуск On-Demand AutoCAD воркера с приоритетом на лист 1
     proc = DwgOnDemandManager.get_or_start_worker(path, target_dir, priority_tab=1)
     if proc:
-        _start_background_worker_pump(proc, target_dir, dpi)
+        _start_background_worker_pump(proc, target_dir, path, dpi)
 
     # Ожидание готовности листа 1
     deadline = time.time() + wait_first_sheet_seconds
@@ -689,14 +727,17 @@ def render_dwg_model_progressive(
     elif not page1_png.exists() and thumb_png.exists():
         page1_png.write_bytes(thumb_png.read_bytes())
 
-    # Сбор метаданных листов из manifest.json
+    # Сбор метаданных листов из manifest.json или кеша событий воркера
     layouts = []
     if manifest_path.exists():
         try:
-            m = json.loads(manifest_path.read_text(encoding="utf-8"))
+            m = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
             layouts = m.get("layouts", [])
         except Exception:
             pass
+
+    if not layouts:
+        layouts = DwgOnDemandManager.get_layouts(path)
 
     items = []
     if layouts:
@@ -725,7 +766,7 @@ def render_dwg_model_progressive(
         "sourceType": "DWG",
         "dpi": dpi,
         "pages": len(layouts) if layouts else 1,
-        "renderedPages": len([it for it in items if it["bytes"] > 0]),
+        "renderedPages": len(layouts) if layouts else 1,
         "cacheKey": cache_key,
         "cacheHit": False,
         "cacheHitPages": len([it for it in items if it["bytes"] > 0]),
