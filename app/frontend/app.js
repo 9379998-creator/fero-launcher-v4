@@ -1166,7 +1166,7 @@ async function refreshObjectInPlace(options = {}) {
   renderTree();
   finishProgress(hasDiffChanges(payload) ? "Обнаружены изменения" : "Изменений нет");
   if (options.reRender !== false && state.renderedPages.length && state.selectedPaths.size) {
-    renderSelectedFiles().catch(showOperationError);
+    renderSelectedFiles({ force: true }).catch(showOperationError);
   }
 }
 
@@ -3939,7 +3939,7 @@ async function renderWordDocuments(wordFiles, options = {}) {
   finishProgress(failed.length ? `${doneText} · ошибок: ${failed.length}` : doneText);
 }
 
-async function renderSelectedFiles() {
+async function renderSelectedFiles(options = {}) {
   const previewItems = collectPreviewFilesForDisplay();
   if (!previewItems.length) {
     startProgress("Превью не найдено", "Выберите папку или файлы (PDF, DWG, Word, Excel).");
@@ -3956,7 +3956,7 @@ async function renderSelectedFiles() {
     await renderWordDocuments(wordItems);
     return;
   }
-  await renderSelectedPdfFiles(previewItems);
+  await renderSelectedPdfFiles(previewItems, options);
 }
 
 async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDisplay(), options = {}) {
@@ -4116,6 +4116,7 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         files: itemsToFetch.map((file) => file.path),
         dpi: PDF_PREVIEW_DPI,
         firstPageOnly: false,
+        force: Boolean(options?.force),
       };
 
       const _batchT0 = performance.now();

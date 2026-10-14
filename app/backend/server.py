@@ -1182,6 +1182,7 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
             "convertCacheHit": False,
             "previewMode": "cad-smart-layouts",
         }
+def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI, force: bool = False) -> dict:
     if not path.is_file() or path.suffix.casefold() != ".dwg":
         raise ValueError(f"Это не DWG-файл: {path}")
 
@@ -1194,7 +1195,7 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     except ImportError:
         from dwg_engine import render_dwg_model_progressive
 
-    return render_dwg_model_progressive(path=path, target_dir=target_dir, cache_key=key, dpi=dpi)
+    return render_dwg_model_progressive(path=path, target_dir=target_dir, cache_key=key, dpi=dpi, force=force)
 
 def set_windows_clipboard(text: str) -> bool:
     if os.name != "nt":
@@ -3546,18 +3547,45 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
 
+        if parsed.path == "/api/dwg/cache/clear":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                if raw_file:
+                    file_path = Path(raw_file)
+                    key = file_cache_key(file_path, "dwg-smart-cad-v3")
+                    target_dir = DWG_CACHE_DIR / key
+                    try:
+                        from app.backend.dwg_engine import DwgOnDemandManager
+                        DwgOnDemandManager.stop_worker(file_path)
+                    except Exception:
+                        pass
+                    if target_dir.exists():
+                        shutil.rmtree(target_dir, ignore_errors=True)
+                    self.send_json(HTTPStatus.OK, {"cleared": True, "file": raw_file, "key": key})
+                else:
+                    if DWG_CACHE_DIR.exists():
+                        for item in DWG_CACHE_DIR.iterdir():
+                            if item.is_dir():
+                                shutil.rmtree(item, ignore_errors=True)
+                    self.send_json(HTTPStatus.OK, {"cleared": True, "all": True})
+            except Exception as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
         if parsed.path == "/api/dwg/model-render":
             try:
                 body = self.read_json()
                 raw_files = body.get("files", [])
                 dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                force = bool(body.get("force", False))
                 if dpi < 72 or dpi > 600:
                     raise ValueError("DPI должен быть в диапазоне 72-600")
                 if not isinstance(raw_files, list) or not raw_files:
                     raise ValueError("Не выбраны DWG-файлы для отображения")
                 if len(raw_files) > 1:
                     raise ValueError("Model Space preview пока создаётся по одному DWG-файлу")
-                documents = [render_dwg_model(Path(str(file_path)), dpi=dpi) for file_path in raw_files]
+                documents = [render_dwg_model(Path(str(file_path)), dpi=dpi, force=force) for file_path in raw_files]
                 document_errors = [
                     {"document": document["name"], "path": document["path"], **error}
                     for document in documents

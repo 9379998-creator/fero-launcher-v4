@@ -580,6 +580,7 @@ def render_dwg_model_progressive(
     cache_key: str,
     dpi: int = 150,
     wait_first_sheet_seconds: float = 75.0,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """Прогрессивный рендеринг DWG-модели: немедленный возврат листа 1 и фоновая печать остальных."""
     path = path.resolve()
@@ -589,8 +590,18 @@ def render_dwg_model_progressive(
     page1_png = target_dir / "page-1.png"
     thumb_png = target_dir / "header_thumb.png"
 
-    # 1. Быстрая проверка готового кэша
-    if manifest_path.exists() and manifest_path.stat().st_size > 0:
+    # Если запрошен принудительный перерендер — сбрасываем кэш и останавливаем прошлый воркер
+    if force:
+        DwgOnDemandManager.stop_worker(path)
+        for old_file in target_dir.glob("*"):
+            try:
+                if old_file.is_file():
+                    old_file.unlink()
+            except OSError:
+                pass
+
+    # 1. Быстрая проверка готового кэша (если не force)
+    if not force and manifest_path.exists() and manifest_path.stat().st_size > 0:
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if (
@@ -742,12 +753,22 @@ def render_dwg_page_progressive(
     thumb_path = target_dir / "header_thumb.png"
 
     if png_path.exists() and png_path.stat().st_size > 0:
-        return {
+        item = {
             "page": page,
             "name": f"{file_path.name} · стр. {page}",
             "url": f"/cache/dwg/{cache_key}/{png_path.name}",
             "bytes": png_path.stat().st_size,
+        }
+        return {
+            "name": file_path.name,
+            "path": str(file_path),
+            "dpi": dpi,
+            "page": page,
+            "cacheKey": cache_key,
             "cacheHit": True,
+            "item": item,
+            "url": item["url"],
+            "bytes": item["bytes"],
             "sourcePath": str(file_path),
             "sourceType": "DWG",
             "convertedPdfPath": str(pdf_path) if pdf_path.exists() else "",
@@ -757,12 +778,22 @@ def render_dwg_page_progressive(
     if pdf_path.exists() and pdf_path.stat().st_size > 1024:
         _rasterize_pdf_page(pdf_path, png_path, dpi)
         if png_path.exists() and png_path.stat().st_size > 0:
-            return {
+            item = {
                 "page": page,
                 "name": f"{file_path.name} · стр. {page}",
                 "url": f"/cache/dwg/{cache_key}/{png_path.name}",
                 "bytes": png_path.stat().st_size,
+            }
+            return {
+                "name": file_path.name,
+                "path": str(file_path),
+                "dpi": dpi,
+                "page": page,
+                "cacheKey": cache_key,
                 "cacheHit": True,
+                "item": item,
+                "url": item["url"],
+                "bytes": item["bytes"],
                 "sourcePath": str(file_path),
                 "sourceType": "DWG",
                 "convertedPdfPath": str(pdf_path),
@@ -775,12 +806,22 @@ def render_dwg_page_progressive(
         if pdf_path.exists() and pdf_path.stat().st_size > 1024:
             _rasterize_pdf_page(pdf_path, png_path, dpi)
             if png_path.exists() and png_path.stat().st_size > 0:
-                return {
+                item = {
                     "page": page,
                     "name": f"{file_path.name} · стр. {page}",
                     "url": f"/cache/dwg/{cache_key}/{png_path.name}",
                     "bytes": png_path.stat().st_size,
+                }
+                return {
+                    "name": file_path.name,
+                    "path": str(file_path),
+                    "dpi": dpi,
+                    "page": page,
+                    "cacheKey": cache_key,
                     "cacheHit": False,
+                    "item": item,
+                    "url": item["url"],
+                    "bytes": item["bytes"],
                     "sourcePath": str(file_path),
                     "sourceType": "DWG",
                     "convertedPdfPath": str(pdf_path),
@@ -790,13 +831,24 @@ def render_dwg_page_progressive(
 
     # Если лист еще рендерится, возвращаем превью заголовка
     fallback_url = f"/cache/dwg/{cache_key}/header_thumb.png" if thumb_path.exists() else f"/cache/dwg/{cache_key}/page-1.png"
-    return {
+    fallback_bytes = thumb_path.stat().st_size if thumb_path.exists() else 1024
+    item = {
         "page": page,
         "name": f"{file_path.name} · стр. {page} (Рендерится...)",
         "url": fallback_url,
-        "bytes": thumb_path.stat().st_size if thumb_path.exists() else 1024,
+        "bytes": fallback_bytes,
+    }
+    return {
+        "name": file_path.name,
+        "path": str(file_path),
+        "dpi": dpi,
+        "page": page,
+        "cacheKey": cache_key,
         "cacheHit": False,
         "rendering": True,
+        "item": item,
+        "url": fallback_url,
+        "bytes": fallback_bytes,
         "sourcePath": str(file_path),
         "sourceType": "DWG",
         "convertedPdfPath": "",
