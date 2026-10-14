@@ -3606,6 +3606,50 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
+        if parsed.path == "/api/dwg/status":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                if not raw_file:
+                    raise ValueError("Не указан DWG-файл")
+                file_path = Path(raw_file)
+                key = file_cache_key(file_path, "dwg-smart-cad-v3")
+                target_dir = DWG_CACHE_DIR / key
+                manifest_path = target_dir / "manifest.json"
+
+                ready_pages = []
+                is_complete = False
+                total_layouts = 0
+                if target_dir.exists():
+                    for png_file in target_dir.glob("page-*.png"):
+                        m = re.match(r"^page-(\d+)\.png$", png_file.name)
+                        if m and png_file.stat().st_size > 0:
+                            ready_pages.append(int(m.group(1)))
+                    ready_pages.sort()
+
+                if manifest_path.exists():
+                    try:
+                        m = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+                        is_complete = bool(m.get("isComplete", False))
+                        total_layouts = int(m.get("totalLayouts", 0)) or len(m.get("layouts", []))
+                    except Exception:
+                        pass
+
+                self.send_json(
+                    HTTPStatus.OK,
+                    {
+                        "file": raw_file,
+                        "cacheKey": key,
+                        "readyPages": ready_pages,
+                        "isComplete": is_complete,
+                        "totalLayouts": total_layouts,
+                        "readyCount": len(ready_pages),
+                    },
+                )
+            except Exception as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
         if parsed.path == "/api/dwg/model-page":
             try:
                 body = self.read_json()
@@ -3853,19 +3897,12 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     if match:
                         page_num = int(match.group(1))
                         pdf_candidate = target.parent / f"page_{page_num:04d}.pdf"
-                        deadline = time.time() + 30.0
-                        while time.time() < deadline:
-                            if target.exists() and target.is_file() and target.stat().st_size > 0:
-                                break
-                            if pdf_candidate.exists() and pdf_candidate.stat().st_size > 1024:
-                                try:
-                                    from app.backend.dwg_engine import _rasterize_pdf_page
-                                except ImportError:
-                                    from dwg_engine import _rasterize_pdf_page
-                                _rasterize_pdf_page(pdf_candidate, target, DEFAULT_PDF_DPI)
-                                if target.exists() and target.stat().st_size > 0:
-                                    break
-                            time.sleep(0.5)
+                        if pdf_candidate.exists() and pdf_candidate.stat().st_size > 1024:
+                            try:
+                                from app.backend.dwg_engine import _rasterize_pdf_page
+                            except ImportError:
+                                from dwg_engine import _rasterize_pdf_page
+                            _rasterize_pdf_page(pdf_candidate, target, DEFAULT_PDF_DPI)
 
             if relative.startswith("pdf/"):
                 parts = relative.split("/")
@@ -3882,6 +3919,25 @@ class LauncherHandler(BaseHTTPRequestHandler):
                             except Exception as e:
                                 self.log_message(f"Lazy render failed: {e}")
             if not target.exists() or not target.is_file():
+                if relative.startswith("dwg/"):
+                    parts = relative.split("/")
+                    page_label = parts[2].replace("page-", "").replace(".png", "") if len(parts) == 3 else "…"
+                    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200" viewBox="0 0 300 200">
+  <rect width="100%" height="100%" fill="#1a1c23"/>
+  <rect x="6" y="6" width="288" height="188" rx="4" fill="none" stroke="#333745" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="50%" y="42%" dominant-baseline="middle" text-anchor="middle" font-size="26">⏳</text>
+  <text x="50%" y="65%" dominant-baseline="middle" text-anchor="middle" fill="#d2d5e2" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="13" font-weight="600">Лист {page_label}</text>
+  <text x="50%" y="82%" dominant-baseline="middle" text-anchor="middle" fill="#75798e" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="11">рендерится в фоне…</text>
+</svg>'''
+                    body = svg.encode("utf-8")
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                    self.send_header("X-DWG-Pending", "1")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 self.send_error(HTTPStatus.NOT_FOUND, "Not found")
                 return
 

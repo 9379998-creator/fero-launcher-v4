@@ -46,6 +46,8 @@ const state = {
   diffSummary: null,
   diffFilter: false,
   diffPollTimer: null,
+  dwgPollTimer: null,
+  activeDwgPath: "",
   viewMode: "standard",
   viewerDpi: Number(localStorage.getItem("launcher_viewer_dpi")) || 150,
   activeNavZone: "tree",
@@ -359,6 +361,7 @@ function stopProgress(cancelled = true, abortRequest = true) {
   if (state.progressTimer) clearInterval(state.progressTimer);
   state.progressTimer = null;
   state.progressEase = null;
+  stopDwgStatusPolling();
   els.progressFill.classList.remove("is-busy");
   state.progressCancelled = cancelled;
   if (abortRequest) {
@@ -389,6 +392,97 @@ function stopProgress(cancelled = true, abortRequest = true) {
     renderFormats();
     renderTree();
   }
+}
+
+function stopDwgStatusPolling() {
+  if (state.dwgPollTimer) {
+    clearInterval(state.dwgPollTimer);
+    state.dwgPollTimer = null;
+  }
+  state.activeDwgPath = "";
+}
+
+function startDwgStatusPolling(filePath, totalPages, epoch) {
+  stopDwgStatusPolling();
+  if (!filePath) return;
+  state.activeDwgPath = filePath;
+
+  state.dwgPollTimer = setInterval(async () => {
+    if (state.renderEpoch !== epoch || state.progressCancelled || state.activeDwgPath !== filePath) {
+      stopDwgStatusPolling();
+      return;
+    }
+    try {
+      const resp = await fetch("/api/dwg/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file: filePath }),
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (state.renderEpoch !== epoch || state.activeDwgPath !== filePath) {
+        stopDwgStatusPolling();
+        return;
+      }
+
+      const readyPages = data.readyPages || [];
+      const readySet = new Set(readyPages);
+      const total = data.totalLayouts || totalPages || readyPages.length;
+
+      // Обновляем миниатюры в ленте
+      const thumbs = els.pdfThumbs?.querySelectorAll(".pdf-thumb") || [];
+      thumbs.forEach((thumb) => {
+        const pk = thumb.dataset.pageKey || "";
+        if (!pk.startsWith(filePath + "|")) return;
+        const pageNum = parseInt(pk.substring(filePath.length + 1), 10);
+        if (readySet.has(pageNum)) {
+          const img = thumb.querySelector("img");
+          if (img && img.dataset.dwgLoaded !== "1") {
+            img.dataset.dwgLoaded = "1";
+            img.src = `/cache/dwg/${data.cacheKey}/page-${pageNum}.png?v=${Date.now()}`;
+          }
+        }
+      });
+
+      // Обновляем главное изображение на сцене, если открыт этот чертёж и данный лист готов
+      if (state.activePageKey && state.activePageKey.startsWith(filePath + "|")) {
+        const activePageNum = parseInt(state.activePageKey.substring(filePath.length + 1), 10);
+        if (readySet.has(activePageNum) && els.pdfPageImage) {
+          const currentImgMarker = els.pdfPageImage.dataset.dwgLoadedPage;
+          if (currentImgMarker !== `${filePath}|${activePageNum}`) {
+            els.pdfPageImage.dataset.dwgLoadedPage = `${filePath}|${activePageNum}`;
+            els.pdfPageImage.src = `/cache/dwg/${data.cacheKey}/page-${activePageNum}.png?v=${Date.now()}`;
+            els.pdfPageImage.onload = () => {
+              applyPageView();
+            };
+          }
+        }
+      }
+
+      // Отмечаем готовность страниц в массиве состояния
+      if (state.renderedPages?.length) {
+        state.renderedPages.forEach((p) => {
+          const docPath = p.documentPath || p.sourcePath || p.previewFor?.path || p.path || "";
+          if (docPath === filePath && readySet.has(Number(p.page))) {
+            p.bytes = Math.max(p.bytes || 0, 1024);
+          }
+        });
+      }
+
+      // Обновляем индикатор позиции/разрешения в шапке
+      const activeP = state.renderedPages?.find((p) => pageKey(p) === state.activePageKey);
+      if (activeP) {
+        updatePagePosition(activeP);
+      }
+
+      // Если все листы отрендерены — завершаем опрос
+      if (data.isComplete || (total > 0 && readyPages.length >= total)) {
+        stopDwgStatusPolling();
+      }
+    } catch (err) {
+      console.warn("DWG status poll error:", err);
+    }
+  }, 2500);
 }
 
 function showOperationError(error) {
@@ -2392,6 +2486,7 @@ async function showNativeAppCard(node, options = {}) {
 }
 
 function resetPdfPreview() {
+  stopDwgStatusPolling();
   state.view.userZoomed = false;
   state.activePageKey = "";
   state.activePageUrl = "";
@@ -2849,6 +2944,9 @@ function createPageThumbElement(page) {
     img.src = page.url;
     img.alt = page.name;
     img.draggable = false;
+    if (page.url && page.url.includes("/dwg/")) {
+      img.dataset.dwgLoaded = (page.bytes > 0) ? "1" : "0";
+    }
     thumb.append(img);
   }
   const label = document.createElement("span");
@@ -3474,6 +3572,13 @@ function showPdfPage(page, options = {}) {
   state.activePageUrl = displayPage.url;
   els.pdfPageImage.src = displayPage.url;
   els.pdfPageImage.hidden = false;
+  if (displayPage.url && displayPage.url.includes("/dwg/")) {
+    const pNum = Number(displayPage.page) || 1;
+    const isReady = (displayPage.bytes > 0);
+    els.pdfPageImage.dataset.dwgLoadedPage = isReady ? `${targetDocPath}|${pNum}` : "";
+  } else if (els.pdfPageImage) {
+    delete els.pdfPageImage.dataset.dwgLoadedPage;
+  }
   const canvas = document.getElementById("pdfPageCanvas");
   if (canvas) canvas.hidden = true;
   els.viewerEmpty.hidden = true;
@@ -4181,6 +4286,14 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
         pageGroups[batchIndex] = batchPages;
         await appendPagesToViewer(batchPages, null, myEpoch);
         batchDone = true;
+        payload.documents?.forEach((doc) => {
+          if (doc.sourceType === "DWG" || (doc.items && doc.items.some((it) => it.url && it.url.includes("/dwg/")))) {
+            const hasPending = (doc.cacheHitPages || 0) < (doc.pages || 0);
+            if (hasPending || !doc.isComplete) {
+              startDwgStatusPolling(doc.path || doc.sourcePath, doc.pages, myEpoch);
+            }
+          }
+        });
       }
     } catch (error) {
       if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
@@ -4384,6 +4497,14 @@ async function loadMorePdfFiles(itemsToRender) {
         if (state.renderEpoch !== myEpoch) return;
         await appendPagesToViewer(batchPages, null, myEpoch);
         batchDone = true;
+        payload.documents?.forEach((doc) => {
+          if (doc.sourceType === "DWG" || (doc.items && doc.items.some((it) => it.url && it.url.includes("/dwg/")))) {
+            const hasPending = (doc.cacheHitPages || 0) < (doc.pages || 0);
+            if (hasPending || !doc.isComplete) {
+              startDwgStatusPolling(doc.path || doc.sourcePath, doc.pages, myEpoch);
+            }
+          }
+        });
       } else {
         const errCards = itemsToFetch.map((item) => ({
           type: "missing-preview",

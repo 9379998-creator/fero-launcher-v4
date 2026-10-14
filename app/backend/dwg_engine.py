@@ -656,7 +656,7 @@ def render_dwg_model_progressive(
                     tab = int(lay.get("tabOrder", 1))
                     p_png = target_dir / f"page-{tab}.png"
                     p_pdf = target_dir / f"page_{tab:04d}.pdf"
-                    if not p_png.exists() and p_pdf.exists() and tab <= 5:
+                    if not p_png.exists() and p_pdf.exists():
                         _rasterize_pdf_page(p_pdf, p_png, dpi)
                     items.append({
                         "page": tab,
