@@ -3621,6 +3621,23 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 is_complete = False
                 total_layouts = 0
                 if target_dir.exists():
+                    try:
+                        from app.backend.dwg_engine import _rasterize_pdf_page
+                    except ImportError:
+                        from dwg_engine import _rasterize_pdf_page
+
+                    # На лету проверяем готовые PDF от AutoCAD и нарезаем недостающие PNG
+                    for pdf_file in target_dir.glob("page_*.pdf"):
+                        m_pdf = re.match(r"^page_(\d+)\.pdf$", pdf_file.name)
+                        if m_pdf and pdf_file.stat().st_size > 1024:
+                            tab = int(m_pdf.group(1))
+                            png_p = target_dir / f"page-{tab}.png"
+                            if not png_p.exists() or png_p.stat().st_size == 0:
+                                try:
+                                    _rasterize_pdf_page(pdf_file, png_p, DEFAULT_PDF_DPI)
+                                except Exception as rx:
+                                    self.log_message(f"Rasterize error for {pdf_file.name}: {rx}")
+
                     for png_file in target_dir.glob("page-*.png"):
                         m = re.match(r"^page-(\d+)\.png$", png_file.name)
                         if m and png_file.stat().st_size > 0:
@@ -3634,6 +3651,9 @@ class LauncherHandler(BaseHTTPRequestHandler):
                         total_layouts = int(m.get("totalLayouts", 0)) or len(m.get("layouts", []))
                     except Exception:
                         pass
+
+                if total_layouts > 0 and len(ready_pages) >= total_layouts:
+                    is_complete = True
 
                 self.send_json(
                     HTTPStatus.OK,

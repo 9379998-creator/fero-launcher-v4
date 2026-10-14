@@ -429,16 +429,25 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
       const readySet = new Set(readyPages);
       const total = data.totalLayouts || totalPages || readyPages.length;
 
+      // Отображаем живой прогресс рендеринга для пользователя
+      if (total > 0 && readyPages.length < total) {
+        els.progressLabel.textContent = "Рендеринг листов DWG";
+        els.progressValue.textContent = `${readyPages.length}/${total}`;
+        els.progressDetail.textContent = `Готово ${readyPages.length} из ${total} листов · AutoCAD отрисовывает следующий лист…`;
+        els.progressFill.style.width = `${Math.max(5, Math.round((readyPages.length / total) * 100))}%`;
+        els.progressFill.classList.add("is-busy");
+        els.progressPanel.hidden = false;
+      }
+
       // Обновляем миниатюры в ленте (сопоставляем по cacheKey и номеру листа)
       const thumbs = els.pdfThumbs?.querySelectorAll(".pdf-thumb") || [];
       thumbs.forEach((thumb) => {
         const img = thumb.querySelector("img");
         if (!img) return;
+        const pageNum = parseInt(thumb.dataset.pageNumber || (img.getAttribute("src") || "").match(/page-(\d+)\.png/)?.[1] || "0", 10);
+        if (!pageNum) return;
         const src = img.getAttribute("src") || "";
         if (!src.includes(data.cacheKey) && !src.includes("dwg/")) return;
-        const match = src.match(/page-(\d+)\.png/);
-        if (!match) return;
-        const pageNum = parseInt(match[1], 10);
         if (readySet.has(pageNum)) {
           if (img.dataset.dwgLoaded !== "1" || src.includes(".svg") || img.naturalWidth <= 300) {
             img.dataset.dwgLoaded = "1";
@@ -484,14 +493,15 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
         updatePagePosition(activeP);
       }
 
-      // Если все листы отрендерены — завершаем опрос
+      // Если все листы отрендерены — завершаем опрос и скрываем прогресс
       if (data.isComplete || (total > 0 && readyPages.length >= total)) {
+        finishProgress(`Готово: все ${total} листов чертежа отрендерены`);
         stopDwgStatusPolling();
       }
     } catch (err) {
       console.warn("DWG status poll error:", err);
     }
-  }, 2500);
+  }, 1500);
 }
 
 function showOperationError(error) {
@@ -2919,6 +2929,8 @@ function createPageThumbElement(page) {
   thumb.className = "pdf-thumb";
   thumb.classList.toggle("missing-preview", page.type === "missing-preview");
   thumb.dataset.pageKey = key;
+  thumb.dataset.pageNumber = String(page.page || 1);
+  thumb.dataset.docPath = page.documentPath || page.sourcePath || page.previewFor?.path || page.path || "";
   thumb.classList.toggle("active", key === state.activePageKey);
   thumb.title = `${page.name} · клик — выбор листа, двойной клик — на весь экран`;
 
@@ -3267,9 +3279,8 @@ async function requestHighQualityPage(page, targetDpi = (state.viewerDpi || 150)
   updateViewerDpiButton(true);
 
   try {
-    const endpoint = page.previewType === "DWG_MODEL"
-      ? "/api/dwg/model-page"
-      : "/api/pdf/page";
+    const isDwg = page.previewType === "DWG_MODEL" || page.previewType === "DWG" || page.sourceType === "DWG" || (page.url && page.url.includes("/dwg/"));
+    const endpoint = isDwg ? "/api/dwg/model-page" : "/api/pdf/page";
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3286,9 +3297,23 @@ async function requestHighQualityPage(page, targetDpi = (state.viewerDpi || 150)
       cacheHit: payload.cacheHit,
     };
     state.highQualityPages.set(cacheKey, highPage);
+    page.bytes = Math.max(page.bytes || 0, payload.bytes || payload.item?.bytes || 1024);
     if (state.activePageKey === baseKey) {
       state.activePageUrl = highPage.url;
-      els.pdfPageImage.src = highPage.url;
+      const freshUrl = `${highPage.url}?v=${Date.now()}`;
+      els.pdfPageImage.src = freshUrl;
+      els.pdfPageImage.onload = () => {
+        applyPageView();
+      };
+    }
+    // Также сразу обновляем миниатюру в ленте при успешном ответе
+    const thumbEl = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(baseKey)}"]`);
+    if (thumbEl) {
+      const img = thumbEl.querySelector("img");
+      if (img) {
+        img.dataset.dwgLoaded = "1";
+        img.src = `${highPage.url}?v=${Date.now()}`;
+      }
     }
   } catch (error) {
     if (error.name === "AbortError") return;
@@ -3585,6 +3610,9 @@ function showPdfPage(page, options = {}) {
     const pNum = Number(displayPage.page) || 1;
     const isReady = (displayPage.bytes > 0);
     els.pdfPageImage.dataset.dwgLoadedPage = isReady ? `${targetDocPath}|${pNum}` : "";
+    if (!isReady && !state.dwgPollTimer && targetDocPath) {
+      startDwgStatusPolling(targetDocPath, page.totalPages || 0, state.renderEpoch);
+    }
   } else if (els.pdfPageImage) {
     delete els.pdfPageImage.dataset.dwgLoadedPage;
   }

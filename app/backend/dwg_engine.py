@@ -599,7 +599,8 @@ def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, inpu
                     pdf_p = Path(ev.get("pdfPath", ""))
                     if pdf_p.is_file():
                         png_p = output_dir / f"page-{tab}.png"
-                        _rasterize_pdf_page(pdf_p, png_p, dpi)
+                        if not png_p.exists() or png_p.stat().st_size == 0:
+                            _rasterize_pdf_page(pdf_p, png_p, dpi)
             except Exception:
                 pass
         try:
@@ -607,8 +608,34 @@ def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, inpu
         except Exception:
             pass
 
-    t = threading.Thread(target=_pump, daemon=True, name=f"dwg_pump_{output_dir.name}")
-    t.start()
+    def _watcher():
+        while proc.poll() is None:
+            try:
+                for pdf_p in output_dir.glob("page_*.pdf"):
+                    m = re.match(r"^page_(\d+)\.pdf$", pdf_p.name)
+                    if m and pdf_p.stat().st_size > 1024:
+                        tab = int(m.group(1))
+                        png_p = output_dir / f"page-{tab}.png"
+                        if not png_p.exists() or png_p.stat().st_size == 0:
+                            _rasterize_pdf_page(pdf_p, png_p, dpi)
+            except Exception:
+                pass
+            time.sleep(1.0)
+        try:
+            for pdf_p in output_dir.glob("page_*.pdf"):
+                m = re.match(r"^page_(\d+)\.pdf$", pdf_p.name)
+                if m and pdf_p.stat().st_size > 1024:
+                    tab = int(m.group(1))
+                    png_p = output_dir / f"page-{tab}.png"
+                    if not png_p.exists() or png_p.stat().st_size == 0:
+                        _rasterize_pdf_page(pdf_p, png_p, dpi)
+        except Exception:
+            pass
+
+    t1 = threading.Thread(target=_pump, daemon=True, name=f"dwg_pump_{output_dir.name}")
+    t1.start()
+    t2 = threading.Thread(target=_watcher, daemon=True, name=f"dwg_watch_{output_dir.name}")
+    t2.start()
 
 
 def render_dwg_model_progressive(
@@ -666,6 +693,7 @@ def render_dwg_model_progressive(
                         "name": f"{path.name} · {lay.get('name', f'Лист {tab}')}",
                         "url": f"/cache/dwg/{cache_key}/{p_png.name}",
                         "bytes": p_png.stat().st_size if p_png.exists() else 0,
+                        "previewType": "DWG_MODEL",
                     })
 
                 if not items and page1_png.exists():
@@ -674,9 +702,10 @@ def render_dwg_model_progressive(
                         "name": f"{path.name} · Лист 1",
                         "url": f"/cache/dwg/{cache_key}/{page1_png.name}",
                         "bytes": page1_png.stat().st_size if page1_png.exists() else 0,
+                        "previewType": "DWG_MODEL",
                     })
 
-                is_complete = bool(manifest.get("isComplete", False))
+                is_complete = bool(manifest.get("isComplete", False)) or (len(layouts) > 0 and len(missing_tabs) == 0)
                 # Если часть листов ещё не отпечатана — гарантированно возобновляем воркер в фоне!
                 if missing_tabs and not is_complete:
                     first_missing = missing_tabs[0]
@@ -696,6 +725,7 @@ def render_dwg_model_progressive(
                     "cacheKey": cache_key,
                     "cacheHit": not missing_tabs,
                     "cacheHitPages": len([it for it in items if it["bytes"] > 0]),
+                    "isComplete": is_complete,
                     "newRenderedPages": 0,
                     "errors": [],
                     "items": items,
@@ -760,6 +790,7 @@ def render_dwg_model_progressive(
                 "name": f"{path.name} · {lay.get('name', f'Лист {tab}')}",
                 "url": f"/cache/dwg/{cache_key}/{p_png.name}",
                 "bytes": p_png.stat().st_size if p_png.exists() else 0,
+                "previewType": "DWG_MODEL",
             })
     else:
         items.append({
@@ -767,7 +798,10 @@ def render_dwg_model_progressive(
             "name": f"{path.name} · Лист 1",
             "url": f"/cache/dwg/{cache_key}/{page1_png.name}",
             "bytes": page1_png.stat().st_size if page1_png.exists() else 0,
+            "previewType": "DWG_MODEL",
         })
+
+    is_complete_now = bool(len(items) > 0 and all(it["bytes"] > 0 for it in items))
 
     return {
         "name": path.name,
@@ -781,6 +815,7 @@ def render_dwg_model_progressive(
         "cacheKey": cache_key,
         "cacheHit": False,
         "cacheHitPages": len([it for it in items if it["bytes"] > 0]),
+        "isComplete": is_complete_now,
         "newRenderedPages": 1 if page1_ready else 0,
         "errors": [],
         "items": items,
@@ -810,6 +845,7 @@ def render_dwg_page_progressive(
             "name": f"{file_path.name} · стр. {page}",
             "url": f"/cache/dwg/{cache_key}/{png_path.name}",
             "bytes": png_path.stat().st_size,
+            "previewType": "DWG_MODEL",
         }
         return {
             "name": file_path.name,
@@ -835,6 +871,7 @@ def render_dwg_page_progressive(
                 "name": f"{file_path.name} · стр. {page}",
                 "url": f"/cache/dwg/{cache_key}/{png_path.name}",
                 "bytes": png_path.stat().st_size,
+                "previewType": "DWG_MODEL",
             }
             return {
                 "name": file_path.name,
@@ -863,6 +900,7 @@ def render_dwg_page_progressive(
                     "name": f"{file_path.name} · стр. {page}",
                     "url": f"/cache/dwg/{cache_key}/{png_path.name}",
                     "bytes": png_path.stat().st_size,
+                    "previewType": "DWG_MODEL",
                 }
                 return {
                     "name": file_path.name,
@@ -889,6 +927,7 @@ def render_dwg_page_progressive(
         "name": f"{file_path.name} · стр. {page} (Рендерится...)",
         "url": fallback_url,
         "bytes": fallback_bytes,
+        "previewType": "DWG_MODEL",
     }
     return {
         "name": file_path.name,
