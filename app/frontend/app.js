@@ -429,15 +429,18 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
       const readySet = new Set(readyPages);
       const total = data.totalLayouts || totalPages || readyPages.length;
 
-      // Обновляем миниатюры в ленте
+      // Обновляем миниатюры в ленте (сопоставляем по cacheKey и номеру листа)
       const thumbs = els.pdfThumbs?.querySelectorAll(".pdf-thumb") || [];
       thumbs.forEach((thumb) => {
-        const pk = thumb.dataset.pageKey || "";
-        if (!pk.startsWith(filePath + "|")) return;
-        const pageNum = parseInt(pk.substring(filePath.length + 1), 10);
+        const img = thumb.querySelector("img");
+        if (!img) return;
+        const src = img.getAttribute("src") || "";
+        if (!src.includes(data.cacheKey) && !src.includes("dwg/")) return;
+        const match = src.match(/page-(\d+)\.png/);
+        if (!match) return;
+        const pageNum = parseInt(match[1], 10);
         if (readySet.has(pageNum)) {
-          const img = thumb.querySelector("img");
-          if (img && img.dataset.dwgLoaded !== "1") {
+          if (img.dataset.dwgLoaded !== "1" || src.includes(".svg") || img.naturalWidth <= 300) {
             img.dataset.dwgLoaded = "1";
             img.src = `/cache/dwg/${data.cacheKey}/page-${pageNum}.png?v=${Date.now()}`;
           }
@@ -445,16 +448,22 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
       });
 
       // Обновляем главное изображение на сцене, если открыт этот чертёж и данный лист готов
-      if (state.activePageKey && state.activePageKey.startsWith(filePath + "|")) {
-        const activePageNum = parseInt(state.activePageKey.substring(filePath.length + 1), 10);
-        if (readySet.has(activePageNum) && els.pdfPageImage) {
-          const currentImgMarker = els.pdfPageImage.dataset.dwgLoadedPage;
-          if (currentImgMarker !== `${filePath}|${activePageNum}`) {
-            els.pdfPageImage.dataset.dwgLoadedPage = `${filePath}|${activePageNum}`;
-            els.pdfPageImage.src = `/cache/dwg/${data.cacheKey}/page-${activePageNum}.png?v=${Date.now()}`;
-            els.pdfPageImage.onload = () => {
-              applyPageView();
-            };
+      if (els.pdfPageImage) {
+        const stageSrc = els.pdfPageImage.getAttribute("src") || "";
+        if (stageSrc.includes(data.cacheKey) || stageSrc.includes("dwg/")) {
+          const activeMatch = stageSrc.match(/page-(\d+)\.png/);
+          if (activeMatch) {
+            const activePageNum = parseInt(activeMatch[1], 10);
+            if (readySet.has(activePageNum)) {
+              const marker = `${data.cacheKey}|${activePageNum}`;
+              if (els.pdfPageImage.dataset.dwgLoadedPage !== marker || els.pdfPageImage.naturalWidth <= 300) {
+                els.pdfPageImage.dataset.dwgLoadedPage = marker;
+                els.pdfPageImage.src = `/cache/dwg/${data.cacheKey}/page-${activePageNum}.png?v=${Date.now()}`;
+                els.pdfPageImage.onload = () => {
+                  applyPageView();
+                };
+              }
+            }
           }
         }
       }
