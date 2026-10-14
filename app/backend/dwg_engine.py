@@ -652,12 +652,15 @@ def render_dwg_model_progressive(
 
                 layouts = manifest.get("layouts", [])
                 items = []
+                missing_tabs = []
                 for lay in layouts:
                     tab = int(lay.get("tabOrder", 1))
                     p_png = target_dir / f"page-{tab}.png"
                     p_pdf = target_dir / f"page_{tab:04d}.pdf"
                     if not p_png.exists() and p_pdf.exists():
                         _rasterize_pdf_page(p_pdf, p_png, dpi)
+                    if not p_png.exists():
+                        missing_tabs.append(tab)
                     items.append({
                         "page": tab,
                         "name": f"{path.name} · {lay.get('name', f'Лист {tab}')}",
@@ -673,6 +676,14 @@ def render_dwg_model_progressive(
                         "bytes": page1_png.stat().st_size if page1_png.exists() else 0,
                     })
 
+                is_complete = bool(manifest.get("isComplete", False))
+                # Если часть листов ещё не отпечатана — гарантированно возобновляем воркер в фоне!
+                if missing_tabs and not is_complete:
+                    first_missing = missing_tabs[0]
+                    proc = DwgOnDemandManager.get_or_start_worker(path, target_dir, priority_tab=first_missing)
+                    if proc:
+                        _start_background_worker_pump(proc, target_dir, path, dpi)
+
                 return {
                     "name": path.name,
                     "path": str(path),
@@ -683,7 +694,7 @@ def render_dwg_model_progressive(
                     "pages": len(layouts) if layouts else 1,
                     "renderedPages": len(layouts) if layouts else 1,
                     "cacheKey": cache_key,
-                    "cacheHit": True,
+                    "cacheHit": not missing_tabs,
                     "cacheHitPages": len([it for it in items if it["bytes"] > 0]),
                     "newRenderedPages": 0,
                     "errors": [],
