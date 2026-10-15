@@ -105,49 +105,11 @@ if ($visibleAcad) {
 }
 
 if (-not $app) {
-  $existingPids = @(Get-Process acad -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
-  foreach ($progId in $comProgIds) {
-    try {
-      $app = New-Object -ComObject $progId -ErrorAction Stop
-      if ($app) {
-        $usedProgId = $progId
-        $isNewInstance = $true
-        Log-Msg "Created new AutoCAD COM instance ($progId)"
-        break
-      }
-    } catch {}
-  }
-  if ($app) {
-    try {
-      $h = [IntPtr]$app.HWND
-      if ($h -ne [IntPtr]::Zero) {
-        $pId = [uint32]0
-        [void][DwgPlotMessageFilter]::GetWindowThreadProcessId($h, [ref]$pId)
-        if ($pId -gt 0) {
-          $acadPid = [int]$pId
-          Write-Output (@{ event = "worker_acad_pid"; pid = $acadPid } | ConvertTo-Json -Compress)
-        }
-      }
-    } catch {}
-    if ($acadPid -le 0) {
-      $afterPids = @(Get-Process acad -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
-      $newPids = @($afterPids | Where-Object { $existingPids -notcontains $_ })
-      if ($newPids.Count -gt 0) {
-        $acadPid = [int]$newPids[0]
-        Write-Output (@{ event = "worker_acad_pid"; pid = $acadPid } | ConvertTo-Json -Compress)
-      }
-    }
-  }
+  Log-Msg "Active AutoCAD not found; background worker will not start a new instance."
+  Write-Output (@{ event = "error"; message = "AutoCAD is not running" } | ConvertTo-Json -Compress)
+  exit 0
 }
 
-if (-not $app) {
-  Write-Output (@{ event = "error"; message = "AutoCAD COM application not found" } | ConvertTo-Json -Compress)
-  exit 1
-}
-
-if ($isNewInstance) {
-  try { $app.Visible = $false } catch {}
-}
 $document = $null
 
 try {

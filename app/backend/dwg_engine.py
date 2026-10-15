@@ -576,6 +576,11 @@ class DwgOnDemandManager:
             keys = list(cls._active_workers.keys())
         for k in keys:
             cls.stop_worker(k)
+        try:
+            from app.backend.server import kill_orphan_acad_processes
+            kill_orphan_acad_processes()
+        except Exception:
+            pass
 
     @classmethod
     def get_or_start_worker(cls, input_dwg: Path, output_dir: Path, priority_tab: int = 1) -> Optional[subprocess.Popen]:
@@ -586,6 +591,16 @@ class DwgOnDemandManager:
                 if existing.poll() is None:
                     return existing
                 cls._active_workers.pop(key, None)
+
+            # Запускаем фоновый воркер печати ТОЛЬКО если у пользователя уже открыт AutoCAD.
+            # Если AutoCAD не запущен — не поднимаем процесс вовсе.
+            try:
+                from app.backend.server import _find_visible_acad_window
+                cad_hwnd, _ = _find_visible_acad_window()
+                if cad_hwnd <= 0:
+                    return None
+            except Exception:
+                return None
 
             worker_script = REPO_ROOT / "scripts" / "dwg_plot_worker.ps1"
             if not worker_script.is_file():
