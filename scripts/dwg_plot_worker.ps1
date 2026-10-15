@@ -48,6 +48,7 @@ public interface IOleMessageFilter {
 
 public class DwgPlotMessageFilter : IOleMessageFilter {
     [DllImport("ole32.dll")] private static extern int CoRegisterMessageFilter(IOleMessageFilter newFilter, out IOleMessageFilter oldFilter);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     public static void Register() {
         IOleMessageFilter newFilter = new DwgPlotMessageFilter();
         IOleMessageFilter oldFilter = null;
@@ -117,11 +118,24 @@ if (-not $app) {
     } catch {}
   }
   if ($app) {
-    $afterPids = @(Get-Process acad -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
-    $newPids = @($afterPids | Where-Object { $existingPids -notcontains $_ })
-    if ($newPids.Count -gt 0) {
-      $acadPid = [int]$newPids[0]
-      Write-Output (@{ event = "worker_acad_pid"; pid = $acadPid } | ConvertTo-Json -Compress)
+    try {
+      $h = [IntPtr]$app.HWND
+      if ($h -ne [IntPtr]::Zero) {
+        $pId = [uint32]0
+        [void][DwgPlotMessageFilter]::GetWindowThreadProcessId($h, [ref]$pId)
+        if ($pId -gt 0) {
+          $acadPid = [int]$pId
+          Write-Output (@{ event = "worker_acad_pid"; pid = $acadPid } | ConvertTo-Json -Compress)
+        }
+      }
+    } catch {}
+    if ($acadPid -le 0) {
+      $afterPids = @(Get-Process acad -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+      $newPids = @($afterPids | Where-Object { $existingPids -notcontains $_ })
+      if ($newPids.Count -gt 0) {
+        $acadPid = [int]$newPids[0]
+        Write-Output (@{ event = "worker_acad_pid"; pid = $acadPid } | ConvertTo-Json -Compress)
+      }
     }
   }
 }

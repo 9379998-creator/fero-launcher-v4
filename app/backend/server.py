@@ -1999,6 +1999,20 @@ def _bring_explorer_to_front(target_dir: str, timeout: float = 120.0) -> None:
                            os.path.basename(os.path.normpath(target_dir)))
 
 
+def _get_autocad_launcher_exe() -> str:
+    """Возвращает путь к официальному AcLauncher.exe (AutoCAD DWG Launcher), если он есть на машине."""
+    if os.name != "nt":
+        return ""
+    candidates = [
+        r"C:\Program Files\Common Files\Autodesk Shared\AcShellEx\AcLauncher.exe",
+        r"C:\Program Files (x86)\Common Files\Autodesk Shared\AcShellEx\AcLauncher.exe",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return ""
+
+
 def _find_visible_acad_window() -> tuple[int, int]:
     """Возвращает (hwnd, pid) видимого пользовательского окна AutoCAD, либо (0, 0).
 
@@ -2009,26 +2023,73 @@ def _find_visible_acad_window() -> tuple[int, int]:
     if os.name != "nt":
         return 0, 0
     try:
-        import win32gui
-        import win32process
+        import ctypes
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        GW_OWNER = 4
 
-        result_hwnd, result_pid = 0, 0
+        result_hwnd = 0
+        result_pid = 0
+
+        class _Rect(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        def _pid_of(h: int) -> int:
+            out = ctypes.c_ulong(0)
+            try:
+                u32.GetWindowThreadProcessId(h, ctypes.byref(out))
+            except Exception:
+                pass
+            return int(out.value)
+
+        def _image_of(test_pid: int) -> str:
+            try:
+                handle = k32.OpenProcess(0x1000, False, test_pid)
+                if not handle:
+                    return ""
+                try:
+                    buf = ctypes.create_unicode_buffer(260)
+                    size = ctypes.c_ulong(260)
+                    if k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                        return os.path.basename(buf.value or "").casefold()
+                finally:
+                    k32.CloseHandle(handle)
+            except Exception:
+                pass
+            return ""
+
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
         def _cb(hwnd, _):
             nonlocal result_hwnd, result_pid
-            if not win32gui.IsWindowVisible(hwnd):
-                return True
-            cls_name = win32gui.GetClassName(hwnd)
-            if "Afx" in cls_name or "AutoCAD" in cls_name:
-                title = win32gui.GetWindowText(hwnd)
-                if "AutoCAD" in title or ".dwg" in title.lower():
-                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                    result_hwnd = hwnd
-                    result_pid = pid
-                    return False
+            try:
+                if not u32.IsWindowVisible(hwnd):
+                    return True
+                if u32.GetWindow(hwnd, GW_OWNER):
+                    return True
+                p = _pid_of(hwnd)
+                if not p:
+                    return True
+                img = _image_of(p)
+                if img == "acad.exe":
+                    # Проверяем, что окно имеет реальные размеры (>100x100) и заголовок
+                    rect = _Rect()
+                    if u32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                        area = max(0, rect.right - rect.left) * max(0, rect.bottom - rect.top)
+                        if area > 10000 and u32.GetWindowTextLengthW(hwnd) > 0:
+                            result_hwnd = hwnd
+                            result_pid = p
+                            return False
+            except Exception:
+                pass
             return True
 
-        win32gui.EnumWindows(_cb, None)
+        u32.EnumWindows(EnumWindowsProc(_cb), 0)
         return result_hwnd, result_pid
     except Exception:
         return 0, 0
@@ -2062,22 +2123,6 @@ def _get_active_autocad_com():
         pass
     return None
 
-
-def _is_autocad_process_running() -> bool:
-    """Проверяет наличие живого процесса acad.exe в системе."""
-    if os.name != "nt":
-        return False
-    try:
-        res = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq acad.exe", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            **hidden_process_kwargs(),
-        )
-        return "acad.exe" in (res.stdout or "").lower()
-    except Exception:
-        return False
 
 
 def bring_native_window_to_front(pid: int, exe_path: str, timeout: float = 120.0) -> None:
@@ -2444,6 +2489,15 @@ def launch_native_file(path: Path) -> str:
                 error_code="configured_app_missing",
                 details={"extension": norm_ext, "configured_app": configured_exe},
             )
+        if norm_ext in (".dwg", ".dxf") and os.path.basename(clean_exe).casefold() == "acad.exe":
+            ac_launcher = _get_autocad_launcher_exe()
+            if ac_launcher:
+                target_dir = os.path.dirname(os.path.normpath(str(path.resolve())))
+                if _shell_open(ac_launcher, f'/O "{str(path.resolve())}"', target_dir):
+                    bring_native_window_to_front(0, "acad.exe")
+                    _bring_window_to_front(None, None, 120.0, path.name, 3)
+                    return "custom-app:AcLauncher.exe"
+
         return launch_custom_app(clean_exe, path)
 
     # Настройка отсутствует или пуста -> системный fallback
@@ -3886,39 +3940,32 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     raise ValueError("Это облачный документ Google. Откройте его через браузер (Google Docs / Sheets).")
                 action = str(body.get("action", "") or "default").strip().lower()
 
-                if suffix == ".dwg" and action not in ("explorer", "system"):
-                    # Остановка фонового воркера рендеринга, чтобы избежать блокировки файла
+                if suffix in (".dwg", ".dxf") and action not in ("explorer", "system"):
+                    # Остановка всех фоновых воркеров рендеринга DWG, чтобы освободить файл
                     try:
                         from app.backend.dwg_engine import DwgOnDemandManager
-                        DwgOnDemandManager.stop_worker(target)
+                        DwgOnDemandManager.stop_all_workers()
                     except Exception:
                         pass
 
-                    # Проверяем, есть ли запущенный процесс или видимое окно AutoCAD у пользователя.
                     acad_opened = False
                     if os.name == "nt":
                         user_hwnd, user_pid = _find_visible_acad_window()
-                        acad_process_exists = (user_hwnd > 0) or _is_autocad_process_running()
 
-                        if acad_process_exists:
-                            # AutoCAD уже запущен на машине (в виде окна или процесса).
-                            # Ни в коем случае НЕ вызываем launch_custom_app("acad.exe"),
-                            # чтобы не плодить второй процесс acad.exe!
+                        if user_hwnd > 0:
+                            # Окно AutoCAD УЖЕ ОТКРЫТО у пользователя.
+                            # Открываем документ в существующем окне (через COM или AcLauncher).
+                            # Ни в коем случае НЕ запускаем acad.exe напрямую, чтобы не создать второй процесс!
                             try:
                                 acad = _get_active_autocad_com()
                                 if acad:
-                                    acad_hwnd = getattr(acad, "HWND", 0) or user_hwnd
-                                    try:
-                                        acad.Visible = True
-                                    except Exception:
-                                        pass
                                     try:
                                         acad.WindowState = 3  # acMax
                                     except Exception:
                                         pass
-                                    if acad_hwnd:
+                                    if user_hwnd:
                                         try:
-                                            _force_foreground(acad_hwnd, 3)
+                                            _force_foreground(user_hwnd, 3)
                                         except Exception:
                                             pass
                                     elif user_pid:
@@ -3956,7 +4003,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
 
                                         threading.Thread(
                                             target=_bg_open_acad_doc,
-                                            args=(str(target), target.name, acad_hwnd),
+                                            args=(str(target), target.name, user_hwnd),
                                             daemon=True,
                                         ).start()
 
@@ -3966,18 +4013,29 @@ class LauncherHandler(BaseHTTPRequestHandler):
                                 logger.warning("Could not connect via COM to active AutoCAD: %s", err)
 
                             if not acad_opened:
-                                # Если COM недоступен, но процесс/окно AutoCAD УЖЕ ЕСТЬ:
-                                # Запускаем файл через системную ассоциацию Windows (ShellExecuteW на САМ файл .dwg).
-                                # Windows Shell маршрутизирует документ в существующий экземпляр через DDE/AcLauncher
-                                # и НЕ создает второй независимый процесс acad.exe!
-                                if user_hwnd:
-                                    try:
-                                        _force_foreground(user_hwnd, 3)
-                                    except Exception:
-                                        pass
-                                _shell_open(str(target), "", os.path.dirname(str(target)))
+                                ac_launcher = _get_autocad_launcher_exe()
+                                if ac_launcher:
+                                    _shell_open(ac_launcher, f'/O "{str(target)}"', os.path.dirname(str(target)))
+                                    _force_foreground(user_hwnd, 3)
+                                    acad_opened = True
+                                    mode = "autocad-active-launcher"
+                                else:
+                                    _force_foreground(user_hwnd, 3)
+                                    _shell_open(str(target), "", os.path.dirname(str(target)))
+                                    acad_opened = True
+                                    mode = "autocad-shell-dde"
+
+                        else:
+                            # Окно AutoCAD НЕ открыто.
+                            # Запускаем ровно ОДИН экземпляр AutoCAD.
+                            # Если есть официальный AcLauncher.exe — используем его (он исключает дублирование).
+                            ac_launcher = _get_autocad_launcher_exe()
+                            if ac_launcher:
+                                _shell_open(ac_launcher, f'/O "{str(target)}"', os.path.dirname(str(target)))
+                                bring_native_window_to_front(0, "acad.exe")
+                                _bring_window_to_front(None, None, 120.0, target.name, 3)
                                 acad_opened = True
-                                mode = "autocad-shell-dde"
+                                mode = "autocad-launcher-open"
 
                     if not acad_opened:
                         mode = launch_native_file(target)
