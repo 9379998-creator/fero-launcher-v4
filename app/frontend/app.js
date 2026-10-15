@@ -183,20 +183,90 @@ function setMode(mode) {
   updateObjectButtons();
 }
 
+function inWindow3() {
+  if (state.viewMode === "full" || els.shell.classList.contains("full-view")) {
+    return true;
+  }
+  if (els.pdfViewer?.classList.contains("stage-active") && (state.excelWorkbooks?.length > 1 || state.wordDocs?.length > 1)) {
+    return true;
+  }
+  return false;
+}
+
+function exitWindow3() {
+  if (state.viewMode === "full" || els.shell.classList.contains("full-view")) {
+    setViewerMode("standard");
+  }
+  if (els.pdfViewer?.classList.contains("stage-active")) {
+    setStageActive(false);
+  }
+  if (els.excelViewer) els.excelViewer.hidden = true;
+  if (els.wordViewer) els.wordViewer.hidden = true;
+  els.pdfViewer?.classList.remove("empty");
+  if (state.wordDocs?.length > 1) {
+    renderWordDocumentRail();
+  } else if (state.excelWorkbooks?.length > 1) {
+    renderExcelWorkbookRail();
+  }
+  updateObjectButtons();
+}
+
 function setTreeBrowseMode(enabled) {
   els.shell.classList.toggle("tree-browse", Boolean(enabled));
-  if (els.backToTree) els.backToTree.disabled = Boolean(enabled) || !state.currentManifest?.tree;
 }
 
 function updateObjectButtons() {
-  const hasSelection = Boolean(state.selectedObjectId);
+  const isWin3 = inWindow3();
   const tree = inTreeMode();
-  if (els.backToObjects) els.backToObjects.disabled = false;
-  if (els.backToTree) els.backToTree.disabled = !tree;
-  els.load.disabled = false;
-  els.refresh.disabled = !hasSelection;
-  els.display.disabled = !hasSelection && !tree;
-  els.exclude.disabled = !hasSelection;
+  const hasSelection = Boolean(state.selectedObjectId);
+
+  if (isWin3) {
+    // В окне №3 (просмотр документа/чертежа/листа):
+    // АКТИВНЫ ТОЛЬКО кнопка «Назад» и масштабы. Все остальные кнопки неактивны.
+    if (els.backToTree) {
+      els.backToTree.disabled = false;
+      els.backToTree.title = "Вернуться в ленту миниатюр (Окно 2) к дереву файлов (Окно 1)";
+    }
+    if (els.backToObjects) els.backToObjects.disabled = true;
+    if (els.load) els.load.disabled = true;
+    if (els.refresh) els.refresh.disabled = true;
+    if (els.display) els.display.disabled = true;
+    if (els.exclude) els.exclude.disabled = true;
+    if (els.btnSettings) els.btnSettings.disabled = true;
+  } else if (tree) {
+    // В первых двух окнах (Окно 1 дерево + Окно 2 лента миниатюр):
+    // Кнопка «Назад» неактивна (возвращаться некуда).
+    // Кнопка «Объекты» активна (возврат к списку проектов).
+    if (els.backToTree) {
+      els.backToTree.disabled = true;
+      els.backToTree.title = "Кнопка «Назад» неактивна в структуре объекта";
+    }
+    if (els.backToObjects) {
+      els.backToObjects.disabled = false;
+      els.backToObjects.title = "Вернуться к списку загруженных объектов";
+    }
+    if (els.load) els.load.disabled = false;
+    if (els.refresh) els.refresh.disabled = false;
+    if (els.display) els.display.disabled = false;
+    if (els.exclude) els.exclude.disabled = false;
+    if (els.btnSettings) els.btnSettings.disabled = false;
+  } else {
+    // В списке объектов (начальный экран):
+    // Кнопка «Назад» неактивна. Кнопка «Объекты» неактивна (уже в объектах).
+    if (els.backToTree) {
+      els.backToTree.disabled = true;
+      els.backToTree.title = "Кнопка «Назад» неактивна на начальном экране";
+    }
+    if (els.backToObjects) {
+      els.backToObjects.disabled = true;
+      els.backToObjects.title = "Вы находитесь в списке объектов";
+    }
+    if (els.load) els.load.disabled = false;
+    if (els.refresh) els.refresh.disabled = !hasSelection;
+    if (els.display) els.display.disabled = !hasSelection;
+    if (els.exclude) els.exclude.disabled = !hasSelection;
+    if (els.btnSettings) els.btnSettings.disabled = false;
+  }
 }
 
 function updateObjectStats() {
@@ -2906,7 +2976,8 @@ function forwardWordDocContextMenu() {
       const currentDoc = state.wordDoc;
       const path = (info && info.path) || (currentDoc && currentDoc.path) || "";
       if (!path) return;
-      showFileContextMenu(event.clientX, event.clientY, { path, isDir: false, ext: extOfPath(path) });
+      const rect = els.wordDocFrame ? els.wordDocFrame.getBoundingClientRect() : { left: 0, top: 0 };
+      showFileContextMenu(rect.left + event.clientX, rect.top + event.clientY, { path, isDir: false, ext: extOfPath(path) });
     });
     doc.__launcherCtxForwarded = true;
   } catch (_) {}
@@ -2919,25 +2990,31 @@ async function activateWordDocument(index) {
   state.wordDoc = docItem;
   state.wordDocIndex = index;
   state.wordScale = 1;
-  els.wordDocTitle.textContent = docItem.name;
-  els.wordDocTitle.title = docItem.name;
+  if (els.wordDocTitle) {
+    els.wordDocTitle.textContent = docItem.name;
+    els.wordDocTitle.title = docItem.name;
+  }
   renderWordDocumentRail();
   els.pdfViewer.classList.remove("empty");
   els.pdfPageImage.hidden = true;
   els.pdfPageImage.removeAttribute("src");
   els.viewerEmpty.hidden = true;
   els.qualityBadge.hidden = true;
-  els.wordMeta.replaceChildren();
-  const chip = document.createElement("span");
-  chip.className = "excel-tab";
-  chip.textContent = `${docItem.paragraphs ?? "?"} абз. · ${docItem.tables ?? "?"} табл. · ${formatFileSize(docItem.bytes)}`;
-  els.wordMeta.append(chip);
+  if (els.wordMeta) {
+    els.wordMeta.replaceChildren();
+    const chip = document.createElement("span");
+    chip.className = "excel-tab";
+    chip.textContent = `${docItem.paragraphs ?? "?"} абз. · ${docItem.tables ?? "?"} табл. · ${formatFileSize(docItem.bytes)}`;
+    els.wordMeta.append(chip);
+  }
 
   if (els.excelViewer) els.excelViewer.hidden = true;
   els.wordViewer.hidden = false;
   els.viewerControls.hidden = false;
   setActiveNativePath(docItem.path);
-  els.wordOpenNative.onclick = () => openFileByPath(docItem.path, "native");
+  if (els.wordOpenNative) {
+    els.wordOpenNative.onclick = () => openFileByPath(docItem.path, "native");
+  }
   revealPathInTree(docItem.path);
   updateViewTransform();
 
@@ -3860,6 +3937,7 @@ function setStageActive(active) {
   if (els.pdfStage) els.pdfStage.classList.toggle("active-stage", isAct);
   const showControls = state.viewMode === "full" || isAct;
   if (els.viewerControls) els.viewerControls.hidden = !showControls;
+  updateObjectButtons();
   if (isAct) {
     requestAnimationFrame(() => requestAnimationFrame(fitPdfPage));
   }
@@ -3873,18 +3951,12 @@ function setViewerMode(mode) {
   if (mode === "full") {
     setStageActive(true);
     if (els.viewerControls) els.viewerControls.hidden = false;
-    if (els.backToTree) {
-      els.backToTree.disabled = false;
-      els.backToTree.title = "Вернуться в ленту миниатюр (Окно 2) к текущему листу";
-    }
   } else {
     setStageActive(false);
     if (els.pdfTocDrawer) els.pdfTocDrawer.hidden = true;
     if (els.viewerControls) els.viewerControls.hidden = true;
-    if (els.backToTree) {
-      els.backToTree.title = "Вернуться к предыдущему состоянию дерева";
-    }
   }
+  updateObjectButtons();
   const showControls = mode === "full" || els.pdfViewer?.classList.contains("stage-active");
   if (els.viewerControls) els.viewerControls.hidden = !showControls;
   const hasMultiplePages = (state.renderedPages?.length || 0) > 1 || (Number(state.renderedPages?.[0]?.totalPages) || 0) > 1;
@@ -4696,40 +4768,13 @@ els.cancel.addEventListener("click", () => stopProgress(true));
 els.backToObjects.addEventListener("click", () => {
   stopDiffPolling();
   setViewerMode("standard");
+  setStageActive(false);
   setMode("objects");
   loadObjectSummaries().catch(() => {});
 });
 els.backToTree.addEventListener("click", () => {
-  if (state.viewMode === "full" || els.shell.classList.contains("full-view")) {
-    setViewerMode("standard");
-    if (state.excelWorkbooks?.length > 1 && els.excelViewer) {
-      setStageActive(false);
-      els.excelViewer.hidden = true;
-      if (els.wordViewer) els.wordViewer.hidden = true;
-      els.pdfViewer?.classList.remove("empty");
-      renderExcelWorkbookRail();
-    } else if (state.wordDocs?.length > 1 && els.wordViewer) {
-      setStageActive(false);
-      els.wordViewer.hidden = true;
-      if (els.excelViewer) els.excelViewer.hidden = true;
-      els.pdfViewer?.classList.remove("empty");
-      renderWordDocumentRail();
-    }
-    return;
-  }
-  if (els.pdfViewer?.classList.contains("stage-active")) {
-    setStageActive(false);
-    if (state.excelWorkbooks?.length > 1 && els.excelViewer) {
-      els.excelViewer.hidden = true;
-      if (els.wordViewer) els.wordViewer.hidden = true;
-      els.pdfViewer?.classList.remove("empty");
-      renderExcelWorkbookRail();
-    } else if (state.wordDocs?.length > 1 && els.wordViewer) {
-      els.wordViewer.hidden = true;
-      if (els.excelViewer) els.excelViewer.hidden = true;
-      els.pdfViewer?.classList.remove("empty");
-      renderWordDocumentRail();
-    }
+  if (inWindow3()) {
+    exitWindow3();
     return;
   }
   setViewerMode("standard");
@@ -5372,35 +5417,9 @@ function handleGlobalEscape() {
     els.pdfTocDrawer.hidden = true;
     return;
   }
-  // 1. Из полноэкранного режима возвращаемся в стандартный режим с двумя полями
-  if (state.viewMode === "full" || els.shell.classList.contains("full-view")) {
-    setViewerMode("standard");
-    if (state.excelWorkbooks?.length > 1 && els.excelViewer) {
-      setStageActive(false);
-      els.excelViewer.hidden = true;
-      if (els.wordViewer) els.wordViewer.hidden = true;
-      els.pdfViewer?.classList.remove("empty");
-      renderExcelWorkbookRail();
-    } else if (state.wordDocs?.length > 1 && els.wordViewer) {
-      setStageActive(false);
-      els.wordViewer.hidden = true;
-      if (els.excelViewer) els.excelViewer.hidden = true;
-      els.pdfViewer?.classList.remove("empty");
-      renderWordDocumentRail();
-    }
-    return;
-  }
-  // 1.1. Если открыта сцена отдельного документа/таблицы из ленты — возвращаемся к ленте миниатюр
-  if (els.pdfViewer?.classList.contains("stage-active") && (state.renderedPages?.length > 1 || state.excelWorkbooks?.length > 1 || state.wordDocs?.length > 1)) {
-    setStageActive(false);
-    if (els.excelViewer) els.excelViewer.hidden = true;
-    if (els.wordViewer) els.wordViewer.hidden = true;
-    els.pdfViewer?.classList.remove("empty");
-    if (state.wordDocs?.length > 1) {
-      renderWordDocumentRail();
-    } else {
-      renderExcelWorkbookRail();
-    }
+  // 1. Из Окна 3 (полный экран или открытый документ из ленты) возвращаемся в Окно 1 + Окно 2
+  if (inWindow3()) {
+    exitWindow3();
     return;
   }
   // 2. В режиме дерева:

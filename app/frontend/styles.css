@@ -1029,12 +1029,16 @@ textarea:focus {
 /* В стандартном режиме (две зоны: дерево слева, лента миниатюр справа):
    .pdf-thumbs занимает всё правое поле.
    Сцена .pdf-stage скрыта и открывается только в полноэкранном режиме (full-view) или для таблицы Excel */
-.shell:not(.full-view) .pdf-viewer:not(.empty) .pdf-thumbs {
+.shell:not(.full-view) .pdf-viewer:not(.empty):not(.stage-active) .pdf-thumbs {
   display: block !important;
   width: 100%;
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+.shell:not(.full-view) .pdf-viewer.stage-active .pdf-thumbs {
+  display: none !important;
 }
 
 .shell:not(.full-view) .pdf-viewer .pdf-stage:not(:has(.excel-viewer:not([hidden]))):not(:has(#wordViewer:not([hidden]))) {
@@ -1264,6 +1268,29 @@ textarea:focus {
    can cover a successfully rendered large PDF image. */
 .excel-viewer[hidden] {
   display: none !important;
+}
+
+#wordViewer.word-viewer {
+  display: block;
+  grid-template-rows: none;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+#wordViewer.word-viewer[hidden] {
+  display: none !important;
+}
+
+.word-doc-frame {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  display: block;
 }
 
 .excel-book-title {

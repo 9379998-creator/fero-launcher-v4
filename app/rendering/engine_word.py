@@ -81,45 +81,62 @@ def docx_to_html_string(src: Path) -> tuple[str, dict]:
     body_parts = []
     rels = doc.part.rels
     n_paragraphs = 0
-    for p in doc.paragraphs:
-        if not p.text.strip() and not p._p.xpath(".//w:drawing|.//w:pict"):
-            continue
-        style = (p.style.name or "").lower()
-        if style.startswith("heading 1"):
-            tag = "h1"
-        elif style.startswith("heading 2"):
-            tag = "h2"
-        elif style.startswith("heading 3"):
-            tag = "h3"
-        else:
-            tag = "p"
-        align = {1: "c", 2: "r", 3: "j"}.get(p.alignment, "")
-        cls = f' class="{align}"' if align else ""
-        imgs = ""
-        for blip in p._p.xpath(".//a:blip"):
-            rid = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006"
-                           "/relationships}embed")
-            if rid in rels:
-                blob = rels[rid].target_part.blob
-                ctype = rels[rid].target_part.content_type
-                imgs += (f'<img src="data:{ctype};base64,'
-                         f'{base64.b64encode(blob).decode()}">')
-        body_parts.append(f"<{tag}{cls}>{_runs_html(p)}{imgs}</{tag}>")
-        n_paragraphs += 1
-
     n_tables = 0
-    for tbl in doc.tables:
-        n_tables += 1
-        body_parts.append("<table>")
-        for row in tbl.rows:
-            body_parts.append("<tr>")
-            for cell in row.cells:
-                bg = _cell_shading(cell)
-                style_attr = f' style="background:{bg}"' if bg else ""
-                text = "<br>".join(_runs_html(p) for p in cell.paragraphs)
-                body_parts.append(f"<td{style_attr}{_cell_span(cell)}>{text}</td>")
-            body_parts.append("</tr>")
-        body_parts.append("</table>")
+    page_break_count = 1
+
+    # Верхний маркер первой страницы
+    body_parts.append('<div class="doc-page-top"><span class="doc-page-num">— Страница 1 —</span></div>')
+
+    # Читаем элементы тела документа строго в порядке их реального следования
+    for element in doc.element.body:
+        tag_name = element.tag.split("}")[-1] if "}" in element.tag else element.tag
+        if tag_name == "p":
+            from docx.text.paragraph import Paragraph
+            p = Paragraph(element, doc)
+            has_break = bool(p._p.xpath(".//w:br[@w:type='page']|.//w:lastRenderedPageBreak"))
+            if has_break:
+                page_break_count += 1
+                body_parts.append(f'<div class="doc-page-divider" data-page="{page_break_count}"><span class="doc-page-num">— Страница {page_break_count} —</span></div>')
+
+            if not p.text.strip() and not p._p.xpath(".//w:drawing|.//w:pict"):
+                continue
+
+            style = (p.style.name or "").lower()
+            if style.startswith("heading 1"):
+                tag = "h1"
+            elif style.startswith("heading 2"):
+                tag = "h2"
+            elif style.startswith("heading 3"):
+                tag = "h3"
+            else:
+                tag = "p"
+            align = {1: "c", 2: "r", 3: "j"}.get(p.alignment, "")
+            cls = f' class="{align}"' if align else ""
+            imgs = ""
+            for blip in p._p.xpath(".//a:blip"):
+                rid = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006"
+                               "/relationships}embed")
+                if rid in rels:
+                    blob = rels[rid].target_part.blob
+                    ctype = rels[rid].target_part.content_type
+                    imgs += (f'<img src="data:{ctype};base64,'
+                             f'{base64.b64encode(blob).decode()}">')
+            body_parts.append(f"<{tag}{cls}>{_runs_html(p)}{imgs}</{tag}>")
+            n_paragraphs += 1
+        elif tag_name == "tbl":
+            from docx.table import Table
+            tbl = Table(element, doc)
+            n_tables += 1
+            body_parts.append("<table>")
+            for row in tbl.rows:
+                body_parts.append("<tr>")
+                for cell in row.cells:
+                    bg = _cell_shading(cell)
+                    style_attr = f' style="background:{bg}"' if bg else ""
+                    text = "<br>".join(_runs_html(p) for p in cell.paragraphs)
+                    body_parts.append(f"<td{style_attr}{_cell_span(cell)}>{text}</td>")
+                body_parts.append("</tr>")
+            body_parts.append("</table>")
 
     doc_content = "".join(body_parts)
 
@@ -127,8 +144,8 @@ def docx_to_html_string(src: Path) -> tuple[str, dict]:
 <title>{_html.escape(src.stem)}</title>
 <style>
 html,body{{margin:0;padding:0;background:#e2e8f0;color:#1e293b;font:14px/1.6 "Segoe UI",Arial,sans-serif;overflow:auto}}
-#doc-canvas{{display:flex;justify-content:center;padding:24px;min-height:100vh;box-sizing:border-box;transform-origin:top center}}
-#doc-sheet{{background:#fff;width:100%;max-width:880px;min-height:1120px;padding:48px 56px;box-shadow:0 4px 16px rgba(0,0,0,.12);border-radius:2px;box-sizing:border-box}}
+#doc-canvas{{display:flex;justify-content:center;padding:24px 16px;min-height:100vh;box-sizing:border-box;transform-origin:top center}}
+#doc-sheet{{background:#fff;width:100%;max-width:880px;min-height:1120px;padding:36px 48px;box-shadow:0 4px 20px rgba(0,0,0,.12);border-radius:3px;box-sizing:border-box;position:relative}}
 h1{{font-size:22px;line-height:1.3;text-align:center;margin:16px 0 20px}}
 h2{{font-size:18px;line-height:1.3;margin:16px 0 12px}}
 h3{{font-size:16px;line-height:1.3;margin:14px 0 8px}}
@@ -138,12 +155,48 @@ table{{border-collapse:collapse;margin:16px 0;width:100%;table-layout:auto}}
 td,th{{border:1px solid #64748b;padding:6px 10px;vertical-align:top;font-size:13px;line-height:1.4}}
 th{{background:#f1f5f9;font-weight:600}}
 img{{max-width:100%;height:auto;display:block;margin:12px auto}}
+.doc-page-top{{text-align:center;color:#94a3b8;font-size:11px;font-weight:600;padding-bottom:18px;margin-bottom:18px;border-bottom:1px solid #f1f5f9;user-select:none;letter-spacing:0.5px}}
+.doc-page-divider{{text-align:center;color:#94a3b8;font-size:11px;font-weight:600;padding:18px 0 12px;margin:32px 0 20px;border-top:1px dashed #cbd5e1;user-select:none;letter-spacing:0.5px}}
+#doc-floating-page-badge{{position:fixed;bottom:16px;right:24px;background:rgba(30,41,59,.88);backdrop-filter:blur(4px);color:#fff;font-size:12px;font-weight:600;padding:6px 14px;border-radius:999px;box-shadow:0 2px 10px rgba(0,0,0,.25);z-index:1000;pointer-events:none;letter-spacing:.3px;transition:opacity .2s}}
 </style></head><body>
 <div id="doc-canvas"><div id="doc-sheet">{doc_content}</div></div>
+<div id="doc-floating-page-badge">Стр. <span id="cur-p">1</span> из <span id="tot-p">{max(1, page_break_count)}</span></div>
 <script>
 let scale = 1;
 const sheet = document.getElementById('doc-sheet');
 const canvas = document.getElementById('doc-canvas');
+const curPEl = document.getElementById('cur-p');
+const totPEl = document.getElementById('tot-p');
+
+function updatePageCounter() {{
+  const dividers = sheet.querySelectorAll('.doc-page-divider');
+  const total = Math.max(1, dividers.length ? dividers.length + 1 : Math.ceil(sheet.scrollHeight / 1100));
+  totPEl.textContent = total;
+  
+  const scrollMid = window.scrollY + (window.innerHeight / 3);
+  let cur = 1;
+  dividers.forEach((d, idx) => {{
+    if (d.offsetTop <= scrollMid) {{
+      cur = idx + 2;
+    }}
+  }});
+  if (!dividers.length) {{
+    cur = Math.min(total, Math.max(1, Math.floor(scrollMid / 1100) + 1));
+  }}
+  curPEl.textContent = cur;
+}}
+
+window.addEventListener('scroll', updatePageCounter, {{ passive: true }});
+
+// Если в документе не было явных разрывов страниц, но он длинный — создаем визуальные маркеры
+window.addEventListener('DOMContentLoaded', () => {{
+  const dividers = sheet.querySelectorAll('.doc-page-divider');
+  if (!dividers.length && sheet.scrollHeight > 1200) {{
+    const total = Math.ceil(sheet.scrollHeight / 1100);
+    totPEl.textContent = total;
+  }}
+  updatePageCounter();
+}});
 
 function applyZoom(val) {{
   scale = Math.max(0.35, Math.min(3.0, val));
@@ -190,6 +243,9 @@ window.addEventListener('message', (e) => {{
     return html_page, stats
 
 
+WORD_ENGINE_VERSION = "v3"
+
+
 def ensure_docx_preview(src: Path, cache_dir: Path) -> dict:
     """Закэшированный DOCX→HTML. Повтор — мгновенный дисковый хит без парсинга."""
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -200,7 +256,8 @@ def ensure_docx_preview(src: Path, cache_dir: Path) -> dict:
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if (meta.get("sourceMtimeNs") == stat.st_mtime_ns
-                    and meta.get("sourceSize") == stat.st_size):
+                    and meta.get("sourceSize") == stat.st_size
+                    and meta.get("engineVersion") == WORD_ENGINE_VERSION):
                 meta["cacheHit"] = True
                 return meta
         except (OSError, json.JSONDecodeError):
@@ -213,6 +270,7 @@ def ensure_docx_preview(src: Path, cache_dir: Path) -> dict:
         "bytes": out.stat().st_size,
         "sourceMtimeNs": stat.st_mtime_ns,
         "sourceSize": stat.st_size,
+        "engineVersion": WORD_ENGINE_VERSION,
         "cacheHit": False,
         **stats,
     }
