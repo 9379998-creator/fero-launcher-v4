@@ -2009,10 +2009,13 @@ def kill_orphan_acad_processes() -> None:
             "Where-Object { $_.CommandLine -like '*Automation*' } | "
             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
         )
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
             capture_output=True,
             timeout=5,
+            creationflags=creationflags,
+            **hidden_process_kwargs(),
         )
     except Exception:
         pass
@@ -2551,16 +2554,15 @@ def launch_native_file(path: Path) -> str:
 
     if configured_exe:
         is_valid, clean_exe = validate_configured_executable(configured_exe)
-        if not is_valid:
-            ext_label = norm_ext.upper().replace(".", "")
-            raise NativeOpenError(
-                f"Для файлов {ext_label} указано недоступное приложение. Проверьте Параметры → Приложения.",
-                error_code="configured_app_missing",
-                details={"extension": norm_ext, "configured_app": configured_exe},
-            )
-        return launch_custom_app(clean_exe, path)
+        if is_valid:
+            try:
+                return launch_custom_app(clean_exe, path)
+            except Exception as err:
+                logger.warning("Custom app %s failed for %s, falling back to system default: %s", clean_exe, path, err)
+        else:
+            logger.warning("Configured app %r for %s not found on disk, falling back to system default", configured_exe, norm_ext)
 
-    # Настройка отсутствует или пуста -> системный fallback
+    # Настройка отсутствует, пуста или недоступна -> системный fallback
     return launch_system_default(path)
 
 NATIVE_OPEN_LOG_LOCK = threading.Lock()
@@ -3310,6 +3312,26 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     self.send_error(HTTPStatus.NOT_FOUND, "File not found")
                     return
                 
+                if target.suffix.casefold() in {".tif", ".tiff"}:
+                    try:
+                        from PIL import Image
+                        import io
+                        with Image.open(target) as img:
+                            buf = io.BytesIO()
+                            if img.mode not in ("RGB", "RGBA"):
+                                img = img.convert("RGBA" if "A" in img.mode else "RGB")
+                            img.save(buf, format="PNG")
+                            png_bytes = buf.getvalue()
+                            self.send_response(HTTPStatus.OK)
+                            self.send_header("Content-Type", "image/png")
+                            self.send_header("Content-Length", str(len(png_bytes)))
+                            self._apply_cors_headers()
+                            self.end_headers()
+                            self.wfile.write(png_bytes)
+                            return
+                    except Exception as err:
+                        logger.warning("Failed to convert TIFF %s to PNG: %s", target, err)
+
                 content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
                 file_size = target.stat().st_size
                 range_header = self.headers.get("Range")
@@ -4191,7 +4213,6 @@ class LauncherHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/updates/apply":
             # Запуск скачивания и обновления в фоновом потоке, чтобы сразу вернуть ответ браузеру
-            import threading
             from app.updater import check_for_updates, download_update_payload, apply_update_and_exit
 
             def _worker():

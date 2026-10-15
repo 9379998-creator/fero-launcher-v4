@@ -98,6 +98,7 @@ const els = {
   pdfPageImage: document.getElementById("pdfPageImage"),
   txtViewer: document.getElementById("txtViewer"),
   txtContent: document.getElementById("txtContent"),
+  mediaVideoViewer: document.getElementById("mediaVideoViewer"),
   excelViewer: document.getElementById("excelViewer"),
   excelBookTitle: document.getElementById("excelBookTitle"),
   excelTabs: document.getElementById("excelTabs"),
@@ -1627,6 +1628,13 @@ async function previewFileDirectly(node, options = {}) {
       url: `/api/file/raw?path=${encodeURIComponent(node.path)}`,
       previewFor: { type: ext, name: node.name, path: node.path },
     };
+  } else if (["MOV", "MP4", "M4V", "WEBM", "AVI", "MKV"].includes(ext)) {
+    item = {
+      ...node,
+      previewType: "VIDEO",
+      url: `/api/file/raw?path=${encodeURIComponent(node.path)}`,
+      previewFor: { type: ext, name: node.name, path: node.path },
+    };
   } else if (ext === "PDF") {
     item = node;
   } else if (ext === "TXT") {
@@ -2466,6 +2474,18 @@ function collectPreviewFilesForDisplay() {
           path: node.path,
         },
       });
+    } else if (["MOV", "MP4", "M4V", "WEBM", "AVI", "MKV"].includes(ext) && !directSourcePaths.has(node.path)) {
+      directSourcePaths.add(node.path);
+      result.push({
+        ...node,
+        previewType: "VIDEO",
+        url: `/api/file/raw?path=${encodeURIComponent(node.path)}`,
+        previewFor: {
+          type: ext,
+          name: node.name,
+          path: node.path,
+        },
+      });
     } else if (["GDOC", "GSHEET", "GSLIDES"].includes(ext) && !directSourcePaths.has(node.path)) {
       directSourcePaths.add(node.path);
       const isSheet = ext === "GSHEET";
@@ -2628,6 +2648,11 @@ function resetPdfPreview() {
   state.wordDocIndex = 0;
   if (els.txtViewer) els.txtViewer.hidden = true;
   if (els.wordViewer) els.wordViewer.hidden = true;
+  if (els.mediaVideoViewer) {
+    try { els.mediaVideoViewer.pause(); } catch (_) {}
+    els.mediaVideoViewer.hidden = true;
+    els.mediaVideoViewer.removeAttribute("src");
+  }
   // Новый показ стирает ленту целиком: старые миниатюры не смешиваются с новыми.
   els.pdfThumbs.replaceChildren();
   els.pdfPageImage.hidden = true;
@@ -3061,6 +3086,12 @@ function createPageThumbElement(page) {
     prev.textContent = "TXT…";
     thumb.append(prev);
     fillTxtThumbPreview(page, prev);
+  } else if (page.previewType === "VIDEO") {
+    const missing = document.createElement("div");
+    missing.className = "missing-preview-card";
+    const ext = (page.previewFor?.type || "VIDEO").toUpperCase();
+    missing.textContent = `🎬 ${ext}`;
+    thumb.append(missing);
   } else if (page.type === "missing-preview" || page.type === "native-file") {
     const missing = document.createElement("div");
     missing.className = "missing-preview-card";
@@ -3290,6 +3321,7 @@ function pageKey(page) {
   if (!page) return "";
   if (page.type === "missing-preview" || page.type === "native-file") return `native|${page.sourcePath || page.documentPath || page.name}`;
   if (page.previewType === "IMAGE") return `image|${page.previewFor?.path || page.path || page.url || page.name}`;
+  if (page.previewType === "VIDEO") return `video|${page.previewFor?.path || page.path || page.url || page.name}`;
   if (page.previewType === "TXT") return `txt|${page.previewFor?.path || page.path || page.name}`;
   const docPath = page.documentPath || page.sourcePath || page.previewFor?.path || page.path || "";
   return `${docPath}|${page.page || 1}`;
@@ -3363,6 +3395,9 @@ function getActiveSourceInfo() {
   if (els.excelViewer && !els.excelViewer.hidden) {
     const excelPath = (state.excelWorkbook && state.excelWorkbook.path) || state.activeNativePath || "";
     if (excelPath) return { path: excelPath, ext: extOfPath(excelPath) };
+  }
+  if (els.mediaVideoViewer && !els.mediaVideoViewer.hidden && state.activeNativePath) {
+    return { path: state.activeNativePath, ext: extOfPath(state.activeNativePath) };
   }
   if (state.activeTxtPath) return { path: state.activeTxtPath, ext: "TXT" };
   const page = (state.renderedPages || []).find((p) => {
@@ -3642,11 +3677,15 @@ function showPdfPage(page, options = {}) {
 
   if (page.previewType === "IMAGE") {
     clearExcelViewer();
+    if (els.mediaVideoViewer) {
+      try { els.mediaVideoViewer.pause(); } catch (_) {}
+      els.mediaVideoViewer.hidden = true;
+      els.mediaVideoViewer.removeAttribute("src");
+    }
     const sourcePath = page.previewFor?.path || page.path || page.sourcePath;
     setActiveNativePath(sourcePath);
     revealPathInTree(sourcePath, { skipScroll: skipTreeScroll });
     state.activePageUrl = page.url;
-    els.pdfPageImage.src = page.url;
     els.pdfPageImage.hidden = false;
     const canvas = document.getElementById("pdfPageCanvas");
     if (canvas) canvas.hidden = true;
@@ -3654,12 +3693,50 @@ function showPdfPage(page, options = {}) {
     els.pdfViewer.classList.remove("empty");
     els.viewerControls.hidden = false;
     updateActivePdfThumb();
-    if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) applyPageView();
+    els.pdfPageImage.onload = () => {
+      applyPageView();
+      updatePagePosition(page);
+    };
+    els.pdfPageImage.src = page.url;
+    if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) {
+      applyPageView();
+      updatePagePosition(page);
+    }
+    return;
+  }
+
+  if (page.previewType === "VIDEO") {
+    clearExcelViewer();
+    const sourcePath = page.previewFor?.path || page.path || page.sourcePath;
+    setActiveNativePath(sourcePath);
+    revealPathInTree(sourcePath, { skipScroll: skipTreeScroll });
+    state.activePageUrl = "";
+    els.pdfPageImage.hidden = true;
+    els.pdfPageImage.removeAttribute("src");
+    const canvas = document.getElementById("pdfPageCanvas");
+    if (canvas) canvas.hidden = true;
+    els.viewerEmpty.hidden = true;
+    els.pdfViewer.classList.remove("empty");
+    els.viewerControls.hidden = true;
+    updateActivePdfThumb();
+    updatePagePosition(null);
+    if (els.mediaVideoViewer) {
+      els.mediaVideoViewer.hidden = false;
+      els.mediaVideoViewer.src = page.url;
+      els.mediaVideoViewer.onerror = () => {
+        showNativeAppCard({ name: page.name, path: sourcePath, extension: extOfPath(sourcePath) });
+      };
+    }
     return;
   }
 
   if (page.previewType === "TXT") {
     clearExcelViewer();
+    if (els.mediaVideoViewer) {
+      try { els.mediaVideoViewer.pause(); } catch (_) {}
+      els.mediaVideoViewer.hidden = true;
+      els.mediaVideoViewer.removeAttribute("src");
+    }
     const sourcePath = page.previewFor?.path || page.path || page.sourcePath;
     setActiveNativePath(sourcePath);
     state.activeTxtPath = sourcePath;
@@ -4285,10 +4362,10 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
 
   const batches = chunkPreviewItems(itemsToRender);
   const pageGroups = batches.map((batch) => {
-    return batch.filter((item) => item?.type === "missing-preview" || item?.type === "native-file" || item?.previewType === "IMAGE" || item?.previewType === "TXT");
+    return batch.filter((item) => item?.type === "missing-preview" || item?.type === "native-file" || item?.previewType === "IMAGE" || item?.previewType === "VIDEO" || item?.previewType === "TXT");
   });
   const renderableBatchCount = batches.filter((batch) => {
-    return batch.some((item) => item?.type !== "missing-preview" && item?.type !== "native-file" && item?.previewType !== "IMAGE" && item?.previewType !== "TXT");
+    return batch.some((item) => item?.type !== "missing-preview" && item?.type !== "native-file" && item?.previewType !== "IMAGE" && item?.previewType !== "VIDEO" && item?.previewType !== "TXT");
   }).length;
 
   const allErrors = [];
