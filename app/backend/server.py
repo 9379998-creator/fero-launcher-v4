@@ -1999,6 +1999,41 @@ def _bring_explorer_to_front(target_dir: str, timeout: float = 120.0) -> None:
                            os.path.basename(os.path.normpath(target_dir)))
 
 
+def _find_visible_acad_window() -> tuple[int, int]:
+    """Возвращает (hwnd, pid) видимого пользовательского окна AutoCAD, либо (0, 0).
+
+    Гарантирует, что мы подключаемся ТОЛЬКО к реальному окну AutoCAD, открытому
+    пользователем на рабочем столе, и НИКОГДА не цепляемся к фоновым/скрытым
+    COM-серверам или воркерам печати.
+    """
+    if os.name != "nt":
+        return 0, 0
+    try:
+        import win32gui
+        import win32process
+
+        result_hwnd, result_pid = 0, 0
+
+        def _cb(hwnd, _):
+            nonlocal result_hwnd, result_pid
+            if not win32gui.IsWindowVisible(hwnd):
+                return True
+            cls_name = win32gui.GetClassName(hwnd)
+            if "Afx" in cls_name or "AutoCAD" in cls_name:
+                title = win32gui.GetWindowText(hwnd)
+                if "AutoCAD" in title or ".dwg" in title.lower():
+                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                    result_hwnd = hwnd
+                    result_pid = pid
+                    return False
+            return True
+
+        win32gui.EnumWindows(_cb, None)
+        return result_hwnd, result_pid
+    except Exception:
+        return 0, 0
+
+
 def bring_native_window_to_front(pid: int, exe_path: str, timeout: float = 120.0) -> None:
     """Окно нативной программы — на передний план и на весь экран.
 
@@ -3813,65 +3848,69 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
 
-                    # Проверяем, запущен ли уже AutoCAD: если да, активируем окно и открываем документ
-                    # через COM в том же экземпляре, предотвращая двойной запуск процесса acad.exe
+                    # Проверяем, есть ли РЕАЛЬНОЕ открытое видимое окно AutoCAD у пользователя.
+                    # Подключаемся через COM ТОЛЬКО если видимое окно уже существует,
+                    # чтобы не цепляться к скрытым фоновым серверам и не плодить двойные процессы.
                     acad_opened = False
                     if os.name == "nt":
                         try:
-                            import win32com.client
-                            acad = win32com.client.GetActiveObject("AutoCAD.Application")
-                            if acad:
-                                acad_hwnd = getattr(acad, "HWND", 0)
-                                acad.Visible = True
-                                try:
-                                    acad.WindowState = 3  # acMax
-                                except Exception:
-                                    pass
-                                if acad_hwnd:
+                            user_hwnd, user_pid = _find_visible_acad_window()
+                            if user_hwnd > 0:
+                                import win32com.client
+                                acad = win32com.client.GetActiveObject("AutoCAD.Application")
+                                if acad:
+                                    acad_hwnd = getattr(acad, "HWND", 0) or user_hwnd
+                                    acad.Visible = True
                                     try:
-                                        _force_foreground(acad_hwnd, 3)
+                                        acad.WindowState = 3  # acMax
                                     except Exception:
                                         pass
-                                else:
-                                    bring_native_window_to_front(0, "acad.exe")
-
-                                doc_already_open = False
-                                try:
-                                    target_str = str(target.resolve()).casefold()
-                                    for doc in acad.Documents:
-                                        if str(Path(doc.FullName).resolve()).casefold() == target_str:
-                                            doc.Activate()
-                                            doc_already_open = True
-                                            break
-                                except Exception:
-                                    pass
-
-                                if not doc_already_open:
-                                    def _bg_open_acad_doc(target_path_str: str, target_name: str, hwnd_val: int):
-                                        import pythoncom
-                                        pythoncom.CoInitialize()
+                                    if acad_hwnd:
                                         try:
-                                            ac = win32com.client.GetActiveObject("AutoCAD.Application")
-                                            ac.Documents.Open(target_path_str)
-                                            if hwnd_val:
-                                                try:
-                                                    _force_foreground(hwnd_val, 3)
-                                                except Exception:
-                                                    pass
-                                            _bring_window_to_front(None, None, 10.0, target_name, 3)
-                                        except Exception as e:
-                                            logger.warning("Background AutoCAD open failed: %s", e)
-                                        finally:
-                                            pythoncom.CoUninitialize()
+                                            _force_foreground(acad_hwnd, 3)
+                                        except Exception:
+                                            pass
+                                    else:
+                                        bring_native_window_to_front(user_pid, "acad.exe")
 
-                                    threading.Thread(
-                                        target=_bg_open_acad_doc,
-                                        args=(str(target), target.name, acad_hwnd),
-                                        daemon=True,
-                                    ).start()
+                                    doc_already_open = False
+                                    try:
+                                        target_str = str(target.resolve()).casefold()
+                                        for doc in acad.Documents:
+                                            if str(Path(doc.FullName).resolve()).casefold() == target_str:
+                                                doc.Activate()
+                                                doc_already_open = True
+                                                break
+                                    except Exception:
+                                        pass
 
-                                acad_opened = True
-                        except Exception:
+                                    if not doc_already_open:
+                                        def _bg_open_acad_doc(target_path_str: str, target_name: str, hwnd_val: int):
+                                            import pythoncom
+                                            pythoncom.CoInitialize()
+                                            try:
+                                                ac = win32com.client.GetActiveObject("AutoCAD.Application")
+                                                ac.Documents.Open(target_path_str)
+                                                if hwnd_val:
+                                                    try:
+                                                        _force_foreground(hwnd_val, 3)
+                                                    except Exception:
+                                                        pass
+                                                _bring_window_to_front(None, None, 10.0, target_name, 3)
+                                            except Exception as e:
+                                                logger.warning("Background AutoCAD open failed: %s", e)
+                                            finally:
+                                                pythoncom.CoUninitialize()
+
+                                        threading.Thread(
+                                            target=_bg_open_acad_doc,
+                                            args=(str(target), target.name, acad_hwnd),
+                                            daemon=True,
+                                        ).start()
+
+                                    acad_opened = True
+                        except Exception as err:
+                            logger.warning("Could not connect to visible AutoCAD window: %s", err)
                             acad_opened = False
 
                     if acad_opened:

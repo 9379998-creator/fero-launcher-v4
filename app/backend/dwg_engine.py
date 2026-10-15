@@ -520,10 +520,17 @@ class DwgOnDemandManager:
     _lock = threading.Lock()
     _active_workers: Dict[str, subprocess.Popen] = {}
     _worker_layouts: Dict[str, List[Dict[str, Any]]] = {}
+    _worker_acad_pids: Dict[str, int] = {}
 
     @classmethod
     def _worker_key(cls, path: Union[str, Path]) -> str:
         return str(Path(path).resolve()).casefold()
+
+    @classmethod
+    def set_acad_pid(cls, path: Union[str, Path], pid: int) -> None:
+        key = cls._worker_key(path)
+        with cls._lock:
+            cls._worker_acad_pids[key] = pid
 
     @classmethod
     def set_layouts(cls, path: Union[str, Path], layouts: List[Dict[str, Any]]) -> None:
@@ -542,16 +549,33 @@ class DwgOnDemandManager:
         key = cls._worker_key(path)
         with cls._lock:
             proc = cls._active_workers.pop(key, None)
+            acad_pid = cls._worker_acad_pids.pop(key, 0)
             if proc:
                 try:
                     if proc.poll() is None:
                         proc.terminate()
                         try:
-                            proc.wait(timeout=1.5)
+                            proc.wait(timeout=1.0)
                         except Exception:
                             proc.kill()
                 except Exception:
                     pass
+            if acad_pid > 0:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(acad_pid), "/F"],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+
+    @classmethod
+    def stop_all_workers(cls) -> None:
+        with cls._lock:
+            keys = list(cls._active_workers.keys())
+        for k in keys:
+            cls.stop_worker(k)
 
     @classmethod
     def get_or_start_worker(cls, input_dwg: Path, output_dir: Path, priority_tab: int = 1) -> Optional[subprocess.Popen]:
@@ -617,7 +641,11 @@ def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, inpu
                 continue
             try:
                 ev = json.loads(line_str)
-                if ev.get("event") == "doc_opened":
+                if ev.get("event") == "worker_acad_pid":
+                    p_id = int(ev.get("pid") or 0)
+                    if p_id > 0:
+                        DwgOnDemandManager.set_acad_pid(input_dwg, p_id)
+                elif ev.get("event") == "doc_opened":
                     lays = ev.get("layouts", [])
                     if lays:
                         DwgOnDemandManager.set_layouts(input_dwg, lays)

@@ -85,21 +85,26 @@ $comProgIds = @(
 $app = $null
 $usedProgId = ""
 $isNewInstance = $false
+$acadPid = 0
 
-# Сначала проверяем активный экземпляр AutoCAD пользователя (чтобы не плодить дубликаты)
-foreach ($progId in $comProgIds) {
-  try {
-    $app = [System.Runtime.InteropServices.Marshal]::GetActiveObject($progId)
-    if ($app) {
-      $usedProgId = $progId
-      $isNewInstance = $false
-      Log-Msg "Attached to existing active AutoCAD instance ($progId)"
-      break
-    }
-  } catch {}
+# Проверяем, есть ли РЕАЛЬНОЕ открытое видимое окно AutoCAD у пользователя
+$visibleAcad = Get-Process acad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }
+if ($visibleAcad) {
+  foreach ($progId in $comProgIds) {
+    try {
+      $app = [System.Runtime.InteropServices.Marshal]::GetActiveObject($progId)
+      if ($app) {
+        $usedProgId = $progId
+        $isNewInstance = $false
+        Log-Msg "Attached to existing active user AutoCAD instance ($progId)"
+        break
+      }
+    } catch {}
+  }
 }
 
 if (-not $app) {
+  $existingPids = @(Get-Process acad -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
   foreach ($progId in $comProgIds) {
     try {
       $app = New-Object -ComObject $progId -ErrorAction Stop
@@ -110,6 +115,14 @@ if (-not $app) {
         break
       }
     } catch {}
+  }
+  if ($app) {
+    $afterPids = @(Get-Process acad -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+    $newPids = @($afterPids | Where-Object { $existingPids -notcontains $_ })
+    if ($newPids.Count -gt 0) {
+      $acadPid = [int]$newPids[0]
+      Write-Output (@{ event = "worker_acad_pid"; pid = $acadPid } | ConvertTo-Json -Compress)
+    }
   }
 }
 
@@ -433,6 +446,13 @@ try {
   if ($app -and $isNewInstance) {
     try { $app.Quit() } catch {}
     try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null } catch {}
+    if ($acadPid -gt 0) {
+      Start-Sleep -Milliseconds 400
+      try {
+        $p = Get-Process -Id $acadPid -ErrorAction SilentlyContinue
+        if ($p) { Stop-Process -Id $acadPid -Force -ErrorAction SilentlyContinue }
+      } catch {}
+    }
   } elseif ($app) {
     try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($app) | Out-Null } catch {}
   }

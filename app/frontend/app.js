@@ -118,7 +118,6 @@ const els = {
   viewFit: document.getElementById("viewFit"),
   viewRotate: document.getElementById("viewRotate"),
   viewToggleDpi: document.getElementById("viewToggleDpi"),
-  viewOpenNative: document.getElementById("viewOpenNative"),
   viewPrevPage: document.getElementById("viewPrevPage"),
   viewNextPage: document.getElementById("viewNextPage"),
   viewToggleToc: document.getElementById("viewToggleToc"),
@@ -4783,18 +4782,6 @@ if (els.viewNextPage) {
 
 // «Вписать» возвращает всё в нормальное состояние: масштаб картинки,
 // сдвиг и поворот. Панель при этом никуда не уезжает.
-if (els.viewOpenNative) {
-  els.viewOpenNative.addEventListener("click", () => {
-    const info = getActiveSourceInfo();
-    const wb = state.excelWorkbook;
-    const wordDoc = state.wordDoc;
-    const targetPath = (info && info.path) || (wb && wb.path) || (wordDoc && wordDoc.path) || state.activeNativePath || "";
-    if (targetPath) {
-      openFileByPath(targetPath, "native");
-    }
-  });
-}
-
 els.viewFit.addEventListener("click", () => {
   if (state.excelWorkbook) {
     state.view.rotation = 0;
@@ -5145,16 +5132,6 @@ if (els.pdfStage) {
     if (pdfDragMoved) return;
     setViewerMode(state.viewMode === "full" ? "standard" : "full");
   });
-  els.pdfStage.addEventListener("contextmenu", (e) => {
-    // ПКМ в полном экране: меню исходного файла. По пустому полю тоже
-    // работает, если сейчас отображается документ.
-    e.preventDefault();
-    e.stopPropagation();
-    hideFileContextMenu();
-    const info = getActiveSourceInfo();
-    if (!info.path) return;
-    showFileContextMenu(e.clientX, e.clientY, { path: info.path, isDir: false, ext: info.ext });
-  });
 }
 
 if (els.excelBookTitle) {
@@ -5164,22 +5141,7 @@ if (els.excelBookTitle) {
   });
 }
 
-if (els.pdfPageImage) {
-  els.pdfPageImage.addEventListener("contextmenu", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    hideFileContextMenu();
-    const info = getActiveSourceInfo();
-    const targetPath = (info && info.path) || state.activeNativePath || state.revealedPath || "";
-    if (!targetPath) return;
-    showFileContextMenu(event.clientX, event.clientY, {
-      path: targetPath,
-      isDir: false,
-      ext: extOfPath(targetPath),
-    });
-  });
-}
-
+// Единый канонический обработчик ПКМ в окне №3 (просмотрщик)
 if (els.pdfViewer) {
   els.pdfViewer.addEventListener("contextmenu", (event) => {
     if (event.target.closest("button, input, a, .excel-tabs, .excel-tabs-bar, .viewer-controls")) return;
