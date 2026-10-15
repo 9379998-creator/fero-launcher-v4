@@ -181,7 +181,7 @@ function setTreeBrowseMode(enabled) {
 function updateObjectButtons() {
   const hasSelection = Boolean(state.selectedObjectId);
   const tree = inTreeMode();
-  if (els.backToObjects) els.backToObjects.disabled = !tree;
+  if (els.backToObjects) els.backToObjects.disabled = false;
   if (els.backToTree) els.backToTree.disabled = !tree;
   els.load.disabled = false;
   els.refresh.disabled = !hasSelection;
@@ -439,6 +439,9 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
         els.progressPanel.hidden = false;
       }
 
+      const emptyPages = data.emptyPages || [];
+      const emptySet = new Set(emptyPages);
+
       // Обновляем миниатюры в ленте (сопоставляем по cacheKey и номеру листа)
       const thumbs = els.pdfThumbs?.querySelectorAll(".pdf-thumb") || [];
       thumbs.forEach((thumb) => {
@@ -453,6 +456,7 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
             img.dataset.dwgLoaded = "1";
             img.src = `/cache/dwg/${data.cacheKey}/page-${pageNum}.png?v=${Date.now()}`;
           }
+          thumb.classList.toggle("is-empty-dwg-sheet", emptySet.has(pageNum));
         }
       });
 
@@ -483,8 +487,30 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
           const docPath = p.documentPath || p.sourcePath || p.previewFor?.path || p.path || "";
           if (docPath === filePath && readySet.has(Number(p.page))) {
             p.bytes = Math.max(p.bytes || 0, 1024);
+            p.isEmpty = emptySet.has(Number(p.page));
           }
         });
+      }
+
+      // Если текущий открытый лист пустой (например, Лист 1 - просто рамка без чертежа),
+      // а в файле обнаружен лист с реальным чертежом (firstContentPage), и пользователь
+      // еще сам вручную не выбирал конкретный лист — автоматически переключаем на лист с чертежом!
+      if (!state._userNavigatedDwgPage && data.firstContentPage && data.firstContentPage > 0) {
+        const activeP = state.renderedPages?.find((p) => pageKey(p) === state.activePageKey);
+        const activePageNum = Number(activeP?.page) || 1;
+        if (activeP && activeP.isEmpty && activePageNum !== data.firstContentPage) {
+          const contentP = state.renderedPages?.find((p) => {
+            const pDoc = p.documentPath || p.sourcePath || p.previewFor?.path || p.path || "";
+            return pDoc === filePath && Number(p.page) === data.firstContentPage;
+          });
+          if (contentP) {
+            showPdfPage(contentP);
+            const contentThumb = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-number="${data.firstContentPage}"]`);
+            if (contentThumb) {
+              contentThumb.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+            }
+          }
+        }
       }
 
       // Обновляем индикатор позиции/разрешения в шапке
@@ -738,6 +764,9 @@ async function importObjectByPath(path, forceRefresh = false) {
     if (state.progressCancelled) return;
     state.selectedObjectId = payload.id;
     await loadObjectSummaries();
+    setMode("objects");
+    updateObjectButtons();
+    updateObjectStats();
     finishProgress(forceRefresh ? "Объект обновлён" : "Объект загружен");
   } catch (error) {
     showOperationError(error);
@@ -2506,6 +2535,7 @@ async function showNativeAppCard(node, options = {}) {
 
 function resetPdfPreview() {
   stopDwgStatusPolling();
+  state._userNavigatedDwgPage = false;
   state.view.userZoomed = false;
   state.activePageKey = "";
   state.activePageUrl = "";
@@ -2928,6 +2958,7 @@ function createPageThumbElement(page) {
   thumb.type = "button";
   thumb.className = "pdf-thumb";
   thumb.classList.toggle("missing-preview", page.type === "missing-preview");
+  thumb.classList.toggle("is-empty-dwg-sheet", Boolean(page.isEmpty));
   thumb.dataset.pageKey = key;
   thumb.dataset.pageNumber = String(page.page || 1);
   thumb.dataset.docPath = page.documentPath || page.sourcePath || page.previewFor?.path || page.path || "";
@@ -2972,6 +3003,7 @@ function createPageThumbElement(page) {
   }
   const label = document.createElement("span");
   label.textContent = page.name;
+  thumb.append(label);
 
   thumb.addEventListener("mouseenter", () => {
     state.activeNavZone = "thumbs";
@@ -2983,6 +3015,7 @@ function createPageThumbElement(page) {
 
   thumb.addEventListener("click", (event) => {
     event.stopPropagation();
+    state._userNavigatedDwgPage = true;
     state.activeNavZone = "thumbs";
     showPdfPage(page);
     const docPath = thumbPathForPage(page);
@@ -2995,6 +3028,7 @@ function createPageThumbElement(page) {
 
   thumb.addEventListener("dblclick", (event) => {
     event.stopPropagation();
+    state._userNavigatedDwgPage = true;
     state.activeNavZone = "thumbs";
     showPdfPage(page);
     const docPath = thumbPathForPage(page);
@@ -3106,7 +3140,8 @@ async function appendPagesToViewer(pages, insertAfterKey = null, epoch = null) {
   }
 
   if ((!state.activePageKey || !knownStateKeys.has(state.activePageKey)) && state.renderedPages.length) {
-    showPdfPage(state.renderedPages[0]);
+    const targetPage = (!state._userNavigatedDwgPage ? state.renderedPages.find((p) => p.bytes > 0 && !p.isEmpty) : null) || state.renderedPages[0];
+    showPdfPage(targetPage);
   } else {
     updateActivePdfThumb();
   }
@@ -3211,7 +3246,11 @@ function updatePagePosition(page, currentDpiInfo = null) {
       dpiLabel = ` · ${dpi} DPI`;
     }
   }
-  els.pagePosition.textContent = `${pageText}${dpiLabel}`.trim();
+  let emptyTag = "";
+  if (page?.isEmpty) {
+    emptyTag = " · Пустой лист в DWG (оформлен только штамп)";
+  }
+  els.pagePosition.textContent = `${pageText}${dpiLabel}${emptyTag}`.trim();
 }
 
 function setActiveNativePath(path) {
@@ -3229,12 +3268,17 @@ function thumbPathForPage(page) {
 function getActiveSourceInfo() {
   const excelPath = (state.excelWorkbook && state.excelWorkbook.path) || "";
   if (excelPath) return { path: excelPath, ext: extOfPath(excelPath) };
+  const wordPath = (state.wordDoc && state.wordDoc.path) || "";
+  if (wordPath) return { path: wordPath, ext: extOfPath(wordPath) };
   if (state.activeTxtPath) return { path: state.activeTxtPath, ext: "TXT" };
   const page = (state.renderedPages || []).find((p) => {
     try { return pageKey(p) === state.activePageKey; } catch (_) { return false; }
   });
   const filePath = thumbPathForPage(page);
   if (filePath) return { path: filePath, ext: extOfPath(filePath) };
+  if (state.activeNativePath) return { path: state.activeNativePath, ext: extOfPath(state.activeNativePath) };
+  if (state.activeDwgPath) return { path: state.activeDwgPath, ext: "DWG" };
+  if (state.revealedPath) return { path: state.revealedPath, ext: extOfPath(state.revealedPath) };
   return { path: "", ext: "" };
 }
 
@@ -4641,6 +4685,7 @@ els.cancel.addEventListener("click", () => stopProgress(true));
 els.backToObjects.addEventListener("click", () => {
   stopDiffPolling();
   setMode("objects");
+  loadObjectSummaries().catch(() => {});
 });
 els.backToTree.addEventListener("click", () => {
   if (!state.currentManifest?.tree) return;
@@ -5121,13 +5166,33 @@ if (els.excelBookTitle) {
 
 if (els.pdfPageImage) {
   els.pdfPageImage.addEventListener("contextmenu", (event) => {
-    if (!state.activeNativePath) return;
     event.preventDefault();
     event.stopPropagation();
+    hideFileContextMenu();
+    const info = getActiveSourceInfo();
+    const targetPath = (info && info.path) || state.activeNativePath || state.revealedPath || "";
+    if (!targetPath) return;
     showFileContextMenu(event.clientX, event.clientY, {
-      path: state.activeNativePath,
+      path: targetPath,
       isDir: false,
-      ext: extOfPath(state.activeNativePath),
+      ext: extOfPath(targetPath),
+    });
+  });
+}
+
+if (els.pdfViewer) {
+  els.pdfViewer.addEventListener("contextmenu", (event) => {
+    if (event.target.closest("button, input, a, .excel-tabs, .excel-tabs-bar, .viewer-controls")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    hideFileContextMenu();
+    const info = getActiveSourceInfo();
+    const targetPath = (info && info.path) || state.activeNativePath || state.revealedPath || "";
+    if (!targetPath) return;
+    showFileContextMenu(event.clientX, event.clientY, {
+      path: targetPath,
+      isDir: false,
+      ext: extOfPath(targetPath),
     });
   });
 }
@@ -5586,7 +5651,7 @@ if (els.pdfThumbs) {
     state.selectedPaths.clear();
     state.revealedPath = "";
     state.lastSelectedIndex = null;
-    setActiveNativePath("");
+    if (els.pdfViewer?.classList.contains("empty")) setActiveNativePath("");
     updateTreeSelectionHighlight();
   });
 }
@@ -5603,7 +5668,7 @@ if (els.objectTree) {
     state.selectedPaths.clear();
     state.revealedPath = "";
     state.lastSelectedIndex = null;
-    setActiveNativePath("");
+    if (els.pdfViewer?.classList.contains("empty")) setActiveNativePath("");
     updateTreeSelectionHighlight();
   });
 }

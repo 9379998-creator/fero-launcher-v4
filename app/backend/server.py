@@ -2136,15 +2136,16 @@ def bring_native_window_to_front(pid: int, exe_path: str, timeout: float = 120.0
 
             hwnd = None
             deadline = _time.time() + timeout
-            while _time.time() < deadline and hwnd is None:
-                if not _pid_alive(pid):
-                    break
-                hwnd = _best(_main_windows(want_pid=pid))
-                if hwnd is None:
-                    _time.sleep(0.5)
+            if pid:
+                while _time.time() < deadline and hwnd is None:
+                    if not _pid_alive(pid):
+                        break
+                    hwnd = _best(_main_windows(want_pid=pid))
+                    if hwnd is None:
+                        _time.sleep(0.5)
             if hwnd is None and exe_name:
                 for _ in range(20):
-                    hwnd = _best(_main_windows(want_image=exe_name))
+                    hwnd = _best(_main_windows(want_image=exe_name.casefold()))
                     if hwnd is not None:
                         break
                     _time.sleep(0.5)
@@ -3618,13 +3619,15 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 manifest_path = target_dir / "manifest.json"
 
                 ready_pages = []
+                empty_pages = []
+                first_content_page = None
                 is_complete = False
                 total_layouts = 0
                 if target_dir.exists():
                     try:
-                        from app.backend.dwg_engine import _rasterize_pdf_page
+                        from app.backend.dwg_engine import _rasterize_pdf_page, check_image_is_empty_sheet
                     except ImportError:
-                        from dwg_engine import _rasterize_pdf_page
+                        from dwg_engine import _rasterize_pdf_page, check_image_is_empty_sheet
 
                     # На лету проверяем готовые PDF от AutoCAD и нарезаем недостающие PNG
                     for pdf_file in target_dir.glob("page_*.pdf"):
@@ -3642,8 +3645,17 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     for png_file in target_dir.glob("page-*.png"):
                         m = re.match(r"^page-(\d+)\.png$", png_file.name)
                         if m and png_file.stat().st_size > 0:
-                            ready_pages.append(int(m.group(1)))
+                            p_num = int(m.group(1))
+                            ready_pages.append(p_num)
+                            if check_image_is_empty_sheet(png_file):
+                                empty_pages.append(p_num)
                     ready_pages.sort()
+                    empty_pages.sort()
+
+                    for p_num in ready_pages:
+                        if p_num not in empty_pages:
+                            first_content_page = p_num
+                            break
 
                 if manifest_path.exists():
                     try:
@@ -3662,6 +3674,8 @@ class LauncherHandler(BaseHTTPRequestHandler):
                         "file": raw_file,
                         "cacheKey": key,
                         "readyPages": ready_pages,
+                        "emptyPages": empty_pages,
+                        "firstContentPage": first_content_page,
                         "isComplete": is_complete,
                         "totalLayouts": total_layouts,
                         "readyCount": len(ready_pages),
@@ -3807,11 +3821,20 @@ class LauncherHandler(BaseHTTPRequestHandler):
                             import win32com.client
                             acad = win32com.client.GetActiveObject("AutoCAD.Application")
                             if acad:
+                                acad_hwnd = getattr(acad, "HWND", 0)
                                 acad.Visible = True
                                 try:
                                     acad.WindowState = 3  # acMax
                                 except Exception:
                                     pass
+                                if acad_hwnd:
+                                    try:
+                                        _force_foreground(acad_hwnd, 3)
+                                    except Exception:
+                                        pass
+                                else:
+                                    bring_native_window_to_front(0, "acad.exe")
+
                                 doc_already_open = False
                                 try:
                                     target_str = str(target.resolve()).casefold()
@@ -3822,13 +3845,31 @@ class LauncherHandler(BaseHTTPRequestHandler):
                                             break
                                 except Exception:
                                     pass
+
                                 if not doc_already_open:
-                                    try:
-                                        acad.Documents.Open(str(target))
-                                    except Exception:
-                                        pass
-                                bring_native_window_to_front(0, "acad.exe")
-                                _bring_window_to_front(None, None, 120.0, target.name, 3)
+                                    def _bg_open_acad_doc(target_path_str: str, target_name: str, hwnd_val: int):
+                                        import pythoncom
+                                        pythoncom.CoInitialize()
+                                        try:
+                                            ac = win32com.client.GetActiveObject("AutoCAD.Application")
+                                            ac.Documents.Open(target_path_str)
+                                            if hwnd_val:
+                                                try:
+                                                    _force_foreground(hwnd_val, 3)
+                                                except Exception:
+                                                    pass
+                                            _bring_window_to_front(None, None, 10.0, target_name, 3)
+                                        except Exception as e:
+                                            logger.warning("Background AutoCAD open failed: %s", e)
+                                        finally:
+                                            pythoncom.CoUninitialize()
+
+                                    threading.Thread(
+                                        target=_bg_open_acad_doc,
+                                        args=(str(target), target.name, acad_hwnd),
+                                        daemon=True,
+                                    ).start()
+
                                 acad_opened = True
                         except Exception:
                             acad_opened = False

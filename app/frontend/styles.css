@@ -1140,6 +1140,23 @@ textarea:focus {
   box-shadow: 0 0 0 1px #3399ff;
 }
 
+.pdf-thumb.is-empty-dwg-sheet {
+  opacity: 0.75;
+  border-style: dashed;
+}
+
+.pdf-thumb.is-empty-dwg-sheet:hover,
+.pdf-thumb.is-empty-dwg-sheet.active {
+  opacity: 1;
+}
+
+.pdf-thumb.is-empty-dwg-sheet span::after {
+  content: " · пустой";
+  color: #888;
+  font-style: italic;
+  font-size: 10px;
+}
+
 .pdf-thumb img {
   display: block;
   width: auto;

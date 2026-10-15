@@ -488,6 +488,33 @@ def _rasterize_pdf_page(pdf_path: Path, out_png: Path, dpi: int = 150) -> bool:
     return False
 
 
+_EMPTY_SHEET_CACHE: Dict[Tuple[str, int], bool] = {}
+
+
+def check_image_is_empty_sheet(png_path: Union[str, Path]) -> bool:
+    """Определяет, является ли лист пустым шаблоном (рамка/штамп без чертежа в центральной области)."""
+    try:
+        p_obj = Path(png_path)
+        if not p_obj.exists() or p_obj.stat().st_size <= 0:
+            return False
+        cache_key = (str(p_obj.resolve()), p_obj.stat().st_mtime_ns)
+        if cache_key in _EMPTY_SHEET_CACHE:
+            return _EMPTY_SHEET_CACHE[cache_key]
+
+        from PIL import Image
+        import numpy as np
+
+        im = Image.open(p_obj).convert("L")
+        arr = np.array(im)
+        h, w = arr.shape
+        inner = arr[int(h * 0.15) : int(h * 0.75), int(w * 0.15) : int(w * 0.80)]
+        is_empty = bool(np.sum(inner < 230) < 50)
+        _EMPTY_SHEET_CACHE[cache_key] = is_empty
+        return is_empty
+    except Exception:
+        return False
+
+
 class DwgOnDemandManager:
     """Менеджер фоновых воркеров печати DWG."""
     _lock = threading.Lock()
@@ -785,23 +812,29 @@ def render_dwg_model_progressive(
         for lay in layouts:
             tab = int(lay.get("tabOrder", 1))
             p_png = target_dir / f"page-{tab}.png"
+            p_exists = p_png.exists() and p_png.stat().st_size > 0
             items.append({
                 "page": tab,
                 "name": f"{path.name} · {lay.get('name', f'Лист {tab}')}",
                 "url": f"/cache/dwg/{cache_key}/{p_png.name}",
                 "bytes": p_png.stat().st_size if p_png.exists() else 0,
                 "previewType": "DWG_MODEL",
+                "isEmpty": check_image_is_empty_sheet(p_png) if p_exists else False,
             })
     else:
+        p1_exists = page1_png.exists() and page1_png.stat().st_size > 0
         items.append({
             "page": 1,
             "name": f"{path.name} · Лист 1",
             "url": f"/cache/dwg/{cache_key}/{page1_png.name}",
             "bytes": page1_png.stat().st_size if page1_png.exists() else 0,
             "previewType": "DWG_MODEL",
+            "isEmpty": check_image_is_empty_sheet(page1_png) if p1_exists else False,
         })
 
     is_complete_now = bool(len(items) > 0 and all(it["bytes"] > 0 for it in items))
+    empty_pages = [it["page"] for it in items if it.get("bytes", 0) > 0 and it.get("isEmpty")]
+    first_content_page = next((it["page"] for it in items if it.get("bytes", 0) > 0 and not it.get("isEmpty")), None)
 
     return {
         "name": path.name,
@@ -816,6 +849,8 @@ def render_dwg_model_progressive(
         "cacheHit": False,
         "cacheHitPages": len([it for it in items if it["bytes"] > 0]),
         "isComplete": is_complete_now,
+        "emptyPages": empty_pages,
+        "firstContentPage": first_content_page,
         "newRenderedPages": 1 if page1_ready else 0,
         "errors": [],
         "items": items,
@@ -849,6 +884,7 @@ def render_dwg_page_progressive(
             "url": f"/cache/dwg/{cache_key}/{png_name}",
             "bytes": png_path.stat().st_size,
             "previewType": "DWG_MODEL",
+            "isEmpty": check_image_is_empty_sheet(png_path),
         }
         return {
             "name": file_path.name,
@@ -876,6 +912,7 @@ def render_dwg_page_progressive(
                 "url": f"/cache/dwg/{cache_key}/{png_name}",
                 "bytes": png_path.stat().st_size,
                 "previewType": "DWG_MODEL",
+                "isEmpty": check_image_is_empty_sheet(png_path),
             }
             return {
                 "name": file_path.name,
@@ -910,6 +947,7 @@ def render_dwg_page_progressive(
                     "url": f"/cache/dwg/{cache_key}/{png_name}",
                     "bytes": png_path.stat().st_size,
                     "previewType": "DWG_MODEL",
+                    "isEmpty": check_image_is_empty_sheet(png_path),
                 }
                 return {
                     "name": file_path.name,
