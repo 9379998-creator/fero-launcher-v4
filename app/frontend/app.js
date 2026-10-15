@@ -1489,7 +1489,7 @@ function syncSelectionToPreview(fileNode) {
         });
       }
       if (thumbEl) {
-        thumbEl.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+        thumbEl.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
       }
       return;
     }
@@ -1505,7 +1505,7 @@ function syncSelectionToPreview(fileNode) {
       activateExcelWorkbook(wbIndex);
       const wbThumb = els.pdfThumbs?.querySelector(`.excel-book-thumb[data-workbook-index="${wbIndex}"]`);
       if (wbThumb) {
-        wbThumb.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+        wbThumb.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
       }
       return;
     }
@@ -1521,7 +1521,7 @@ function syncSelectionToPreview(fileNode) {
       activateWordDocument(docIndex);
       const docThumb = els.pdfThumbs?.querySelector(`.word-doc-thumb[data-doc-index="${docIndex}"]`);
       if (docThumb) {
-        docThumb.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+        docThumb.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
       }
       return;
     }
@@ -2430,6 +2430,8 @@ function collectPreviewFilesForDisplay() {
         },
       });
     } else if (ext === "DWG") {
+      if (directSourcePaths.has(node.path)) return;
+      directSourcePaths.add(node.path);
       // Массовый показ: только точные пары (папка не важна — пара обычно
       // в соседней папке PDF). При отсутствии пары используем мгновенный thumbnail.
       const pair = findPdfPairForDwg(node, pdfIndex, { fuzzy: false });
@@ -4362,11 +4364,42 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
 
   const batches = chunkPreviewItems(itemsToRender);
   const pageGroups = batches.map((batch) => {
-    return batch.filter((item) => item?.type === "missing-preview" || item?.type === "native-file" || item?.previewType === "IMAGE" || item?.previewType === "VIDEO" || item?.previewType === "TXT");
+    const itemsToFetch = batch.filter((item) => item?.type !== "missing-preview" && item?.type !== "native-file" && item?.previewType !== "IMAGE" && item?.previewType !== "VIDEO" && item?.previewType !== "TXT");
+    if (!itemsToFetch.length) {
+      return batch;
+    }
+    return null;
   });
   const renderableBatchCount = batches.filter((batch) => {
     return batch.some((item) => item?.type !== "missing-preview" && item?.type !== "native-file" && item?.previewType !== "IMAGE" && item?.previewType !== "VIDEO" && item?.previewType !== "TXT");
   }).length;
+
+  let nextCommitBatchIndex = 0;
+  let isFlushing = false;
+  let flushRequested = false;
+
+  async function flushReadyBatches() {
+    if (isFlushing) {
+      flushRequested = true;
+      return;
+    }
+    isFlushing = true;
+    try {
+      do {
+        flushRequested = false;
+        while (!state.progressCancelled && state.renderEpoch === myEpoch && nextCommitBatchIndex < batches.length) {
+          const readyPages = pageGroups[nextCommitBatchIndex];
+          if (!readyPages) break;
+          nextCommitBatchIndex += 1;
+          if (readyPages.length) {
+            await appendPagesToViewer(readyPages, null, myEpoch);
+          }
+        }
+      } while (flushRequested && !state.progressCancelled && state.renderEpoch === myEpoch);
+    } finally {
+      isFlushing = false;
+    }
+  }
 
   const allErrors = [];
   let totalPages = 0;
@@ -4429,21 +4462,18 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
   async function renderBatch(batchIndex) {
     if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
     const batch = batches[batchIndex];
-    const itemsToFetch = batch.filter((item) => item?.type !== "missing-preview" && item?.type !== "native-file" && item?.previewType !== "IMAGE" && item?.previewType !== "TXT");
+    const itemsToFetch = batch.filter((item) => item?.type !== "missing-preview" && item?.type !== "native-file" && item?.previewType !== "IMAGE" && item?.previewType !== "VIDEO" && item?.previewType !== "TXT");
     if (!itemsToFetch.length) {
-      // Готовые элементы (картинки, карточки) — сразу в ленту, fetch не нужен.
-      const ready = pageGroups[batchIndex] || [];
-      if (ready.length) await appendPagesToViewer(ready, null, myEpoch);
+      // Готовые элементы (картинки, карточки) — в pageGroups и flush по порядку
+      pageGroups[batchIndex] = batch;
+      await flushReadyBatches();
       return;
     }
     if (state.renderEpoch !== myEpoch) return;
 
     const isDwg = itemsToFetch[0]?.previewType === "DWG_MODEL";
     const isExcel = itemsToFetch[0]?.previewType === "EXCEL";
-    // Облачный диск отвечает медленно: таймаут пачки масштабируем числом
-    // файлов (до PDF_FETCH_TIMEOUT_MS), а оборванную по таймауту пачку
-    // повторяем один раз — сервер тем временем продолжает рендер и греет
-    // кэш, повтор обычно забирает уже готовые страницы.
+    const isWord = itemsToFetch[0]?.previewType === "WORD";
     const batchTimeout = isDwg ? 600000 : isExcel ? 180000
       : Math.max(180000, Math.min(PDF_FETCH_TIMEOUT_MS, 60000 * Math.max(1, itemsToFetch.length)));
     let controller = null;
@@ -4459,69 +4489,132 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
       if (attempt === 1 && isDwg && totalDwgFiles > 0 && !state.progressCancelled) {
         els.progressDetail.textContent = `Модель ${completedDwgFiles + 1} из ${totalDwgFiles}: ${itemsToFetch[0]?.name || "чертёж"} — рендерится…`;
       }
-    try {
-      controller = new AbortController();
-      state.operationControllers.push(controller);
-      const timeoutId = setTimeout(() => controller.abort(), batchTimeout);
+      try {
+        controller = new AbortController();
+        state.operationControllers.push(controller);
+        const timeoutId = setTimeout(() => controller.abort(), batchTimeout);
 
-      const endpoint = isDwg
-        ? "/api/dwg/model-render"
-        : isExcel
-          ? "/api/excel/render"
-          : "/api/pdf/render";
+        const _batchT0 = performance.now();
+        let payload = null;
 
-      const requestBody = {
-        files: itemsToFetch.map((file) => file.path),
-        dpi: PDF_PREVIEW_DPI,
-        firstPageOnly: false,
-        force: Boolean(options?.force),
-      };
+        if (isWord) {
+          const wordDocs = [];
+          for (const item of itemsToFetch) {
+            try {
+              const res = await fetch("/api/word/document", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ file: item.path }),
+                signal: controller.signal,
+              });
+              if (res.ok) {
+                const data = await res.json();
+                wordDocs.push({
+                  name: item.name,
+                  path: item.path,
+                  sourcePath: item.path,
+                  sourceName: item.name,
+                  sourceType: "WORD",
+                  pages: 1,
+                  renderedPages: 1,
+                  items: [{
+                    page: 1,
+                    url: data.thumbnailUrl || data.url,
+                    previewType: "WORD",
+                  }],
+                });
+              }
+            } catch (_) {}
+          }
+          clearTimeout(timeoutId);
+          if (state.progressCancelled) return;
+          payload = { documents: wordDocs, totalPages: wordDocs.length, renderedPages: wordDocs.length, dpi: PDF_PREVIEW_DPI, errors: [] };
+        } else if (isExcel) {
+          const excelDocs = [];
+          for (const item of itemsToFetch) {
+            try {
+              const res = await fetch("/api/excel/workbook", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ file: item.path }),
+                signal: controller.signal,
+              });
+              if (res.ok) {
+                const data = await res.json();
+                excelDocs.push({
+                  name: item.name,
+                  path: item.path,
+                  sourcePath: item.path,
+                  sourceName: item.name,
+                  sourceType: "EXCEL",
+                  pages: (data.sheets || []).length || 1,
+                  renderedPages: 1,
+                  items: [{
+                    page: 1,
+                    url: data.thumbnailUrl,
+                    previewType: "EXCEL",
+                  }],
+                });
+              }
+            } catch (_) {}
+          }
+          clearTimeout(timeoutId);
+          if (state.progressCancelled) return;
+          payload = { documents: excelDocs, totalPages: excelDocs.length, renderedPages: excelDocs.length, dpi: PDF_PREVIEW_DPI, errors: [] };
+        } else {
+          const endpoint = isDwg ? "/api/dwg/model-render" : "/api/pdf/render";
+          const requestBody = {
+            files: itemsToFetch.map((file) => file.path),
+            dpi: PDF_PREVIEW_DPI,
+            firstPageOnly: false,
+            force: Boolean(options?.force),
+          };
 
-      const _batchT0 = performance.now();
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
+          const response = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(requestBody),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
 
-      if (state.progressCancelled) return;
-      const payload = await response.json();
-      const _hits = (payload.documents || []).filter((d) => d.cacheHit).length;
-      beaconPerf("display-batch", performance.now() - _batchT0, `files=${itemsToFetch.length} hits=${_hits}/${itemsToFetch.length}`);
-      if (!response.ok) {
-        if (state.progressCancelled) return;
-        // Пачка целиком отклонена сервером (файл пропал, 400/500): считаем
-        // ошибкой, иначе финиш соврёт «Готово: 0 страниц» при пустой ленте.
-        allErrors.push({
-          document: itemsToFetch.map((f) => f.name).join(", "),
-          error: payload.error || `HTTP ${response.status}`,
-        });
-        const errCards = itemsToFetch.map((item) => ({
-          type: "missing-preview",
-          name: item?.name || "Документ",
-          documentPath: item?.path || "",
-          sourcePath: item?.path || "",
-          sourceType: item?.extension || "PDF",
-          message: payload.error || "Ошибка превью. Откройте файл через кнопку «Открыть».",
-        }));
-        pageGroups[batchIndex] = errCards;
-        await appendPagesToViewer(errCards, null, myEpoch);
-        batchDone = true;
-      } else {
+          if (state.progressCancelled) return;
+          payload = await response.json();
+          const _hits = (payload.documents || []).filter((d) => d.cacheHit).length;
+          beaconPerf("display-batch", performance.now() - _batchT0, `files=${itemsToFetch.length} hits=${_hits}/${itemsToFetch.length}`);
+          if (!response.ok) {
+            if (state.progressCancelled) return;
+            allErrors.push({
+              document: itemsToFetch.map((f) => f.name).join(", "),
+              error: payload.error || `HTTP ${response.status}`,
+            });
+            const errCards = itemsToFetch.map((item) => ({
+              type: "missing-preview",
+              name: item?.name || "Документ",
+              documentPath: item?.path || "",
+              sourcePath: item?.path || "",
+              sourceType: item?.extension || "PDF",
+              message: payload.error || "Ошибка превью. Откройте файл через кнопку «Открыть».",
+            }));
+            pageGroups[batchIndex] = errCards;
+            await flushReadyBatches();
+            batchDone = true;
+            return;
+          }
+        }
+
         if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
         totalPages += payload.totalPages || 0;
         renderedPages += payload.renderedPages || 0;
         allErrors.push(...(payload.errors || []));
 
-        const batchPages = payload.documents.flatMap((document) => {
+        const batchPages = (payload.documents || []).flatMap((document) => {
           const matchedItem = itemsToFetch.find((f) => f.path === (document.sourcePath || document.path))
             || itemsToFetch.find((f) => f.name === (document.sourceName || document.name))
             || itemsToFetch[0];
           const realSourcePath = document.sourcePath || matchedItem?.previewFor?.path || matchedItem?.path || document.path;
           const realName = matchedItem?.previewFor ? matchedItem.previewFor.name : (document.sourceName || document.name);
-          return document.items.map((page) => ({
+          return (document.items || []).map((page) => ({
             ...page,
             name: `${realName} · стр. ${page.page}`,
             documentPath: document.path,
@@ -4537,7 +4630,7 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
           }));
         });
         pageGroups[batchIndex] = batchPages;
-        await appendPagesToViewer(batchPages, null, myEpoch);
+        await flushReadyBatches();
         batchDone = true;
         payload.documents?.forEach((doc) => {
           if (doc.sourceType === "DWG" || (doc.items && doc.items.some((it) => it.url && it.url.includes("/dwg/")))) {
@@ -4547,47 +4640,44 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
             }
           }
         });
-      }
-    } catch (error) {
-      if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
-      const isTimeout = error?.name === "AbortError";
-      if (isTimeout && attempt < 2) continue;
-      // Финальный провал пачки (включая повтор): тоже ошибка для честности
-      // финишной строки, иначе будет «Готово: 0 страниц» при пустой ленте.
-      allErrors.push({
-        document: itemsToFetch.map((f) => f.name).join(", "),
-        error: isTimeout ? "timeout" : String(error?.message || error),
-      });
-      const errCards = itemsToFetch.map((item) => {
-        const sz = item?.size ? ` (${formatBytes(item.size)})` : "";
-        return {
-          type: "missing-preview",
-          name: item?.name || "Документ",
-          documentPath: item?.path || "",
-          sourcePath: item?.path || "",
-          sourceType: item?.extension || "PDF",
-          message: isTimeout
-            ? `Файл${sz} не дождался ответа облачного диска Google Drive (включая повторную попытку). Нажмите «Открыть», чтобы запустить его напрямую.`
-            : "Ошибка рендеринга. Откройте файл через кнопку «Открыть».",
-        };
-      });
-      pageGroups[batchIndex] = errCards;
-      await appendPagesToViewer(errCards, null, myEpoch);
-      batchDone = true;
-    } finally {
-      if (controller) {
-        state.operationControllers = state.operationControllers.filter((item) => item !== controller);
-        controller = null;
+      } catch (error) {
+        if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
+        const isTimeout = error?.name === "AbortError";
+        if (isTimeout && attempt < 2) continue;
+        allErrors.push({
+          document: itemsToFetch.map((f) => f.name).join(", "),
+          error: isTimeout ? "timeout" : String(error?.message || error),
+        });
+        const errCards = itemsToFetch.map((item) => {
+          const sz = item?.size ? ` (${formatBytes(item.size)})` : "";
+          return {
+            type: "missing-preview",
+            name: item?.name || "Документ",
+            documentPath: item?.path || "",
+            sourcePath: item?.path || "",
+            sourceType: item?.extension || "PDF",
+            message: isTimeout
+              ? `Файл${sz} не дождался ответа облачного диска Google Drive (включая повторную попытку). Нажмите «Открыть», чтобы запустить его напрямую.`
+              : "Ошибка рендеринга. Откройте файл через кнопку «Открыть».",
+          };
+        });
+        pageGroups[batchIndex] = errCards;
+        await flushReadyBatches();
+        batchDone = true;
+      } finally {
+        if (controller) {
+          state.operationControllers = state.operationControllers.filter((item) => item !== controller);
+          controller = null;
+        }
       }
     }
+    if (!state.progressCancelled && state.renderEpoch === myEpoch) {
+      completedBatches += 1;
+      completedFiles += batch.length;
+      if ((batch[0]?.previewType) === "DWG_MODEL") completedDwgFiles += itemsToFetch.length;
+      refreshRenderProgress();
+    }
   }
-  if (!state.progressCancelled && state.renderEpoch === myEpoch) {
-    completedBatches += 1;
-    completedFiles += batch.length;
-    if ((batch[0]?.previewType) === "DWG_MODEL") completedDwgFiles += itemsToFetch.length;
-    refreshRenderProgress();
-  }
-}
 
   async function worker() {
     while (!state.progressCancelled && state.renderEpoch === myEpoch && nextBatchIndex < batches.length) {
@@ -4609,8 +4699,10 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
   }
 
   refreshRenderProgress();
+  await flushReadyBatches();
   const workerCount = Math.min(PDF_RENDER_CONCURRENCY, Math.max(1, renderableBatchCount));
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  await flushReadyBatches();
   if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
 
   refreshRenderProgress();
@@ -5598,7 +5690,7 @@ function stepThumbnails(delta) {
       (el) => el.dataset.pageKey === key
     );
     if (thumbEl) {
-      thumbEl.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+      thumbEl.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
     }
   }
 }
