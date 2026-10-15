@@ -727,12 +727,14 @@ let lastOpenedTime = 0;
 async function openFileByPath(path, action) {
   if (!path) return;
   const now = Date.now();
-  if (isOpeningFile && (now - lastOpenedTime < 1800)) {
+  if (isOpeningFile && (now - lastOpenedTime < 3500)) {
     console.warn("[Launcher] openFileByPath ignored: already in progress", path);
+    showToast("Файл уже открывается…");
     return;
   }
-  if (lastOpenedPath === path && (now - lastOpenedTime < 1800)) {
+  if (lastOpenedPath === path && (now - lastOpenedTime < 3500)) {
     console.warn("[Launcher] openFileByPath ignored: rapid repeat call for same path", path);
+    showToast("Файл уже открывается…");
     return;
   }
   isOpeningFile = true;
@@ -744,7 +746,7 @@ async function openFileByPath(path, action) {
   if (act === "system" || act === "native") {
     actLabel = "программе по умолчанию";
   }
-  startProgress("Запуск: " + actLabel, path);
+  showToast("Запуск в " + actLabel + "…");
   try {
     const response = await fetch("/api/open-file", {
       method: "POST",
@@ -765,7 +767,6 @@ async function openFileByPath(path, action) {
       }
       throw new Error(payload.error || "Не удалось открыть файл");
     }
-    finishProgress("Открыто: " + actLabel);
     showToast("Файл запущен: " + actLabel);
     if (payload.longPathWarning) showNotice(payload.longPathWarning);
   } catch (error) {
@@ -774,7 +775,7 @@ async function openFileByPath(path, action) {
   } finally {
     setTimeout(() => {
       isOpeningFile = false;
-    }, 1200);
+    }, 2500);
   }
 }
 
@@ -2681,7 +2682,8 @@ function forwardExcelSheetContextMenu() {
       const wb = state.excelWorkbook;
       const path = (info && info.path) || (wb && wb.path) || "";
       if (!path) return;
-      showFileContextMenu(event.clientX, event.clientY, { path, isDir: false, ext: extOfPath(path) });
+      const rect = els.excelSheetFrame ? els.excelSheetFrame.getBoundingClientRect() : { left: 0, top: 0 };
+      showFileContextMenu(rect.left + event.clientX, rect.top + event.clientY, { path, isDir: false, ext: extOfPath(path) });
     });
     doc.__launcherCtxForwarded = true;
   } catch (_) {}
@@ -3354,10 +3356,14 @@ function thumbPathForPage(page) {
 // Источник текущего кадра для ПКМ в полном экране: всегда исходный файл,
 // никогда PNG-кэш. DWG через пару -> путь DWG, Word -> .docx и т.д.
 function getActiveSourceInfo() {
-  const excelPath = (state.excelWorkbook && state.excelWorkbook.path) || "";
-  if (excelPath) return { path: excelPath, ext: extOfPath(excelPath) };
-  const wordPath = (state.wordDoc && state.wordDoc.path) || "";
-  if (wordPath) return { path: wordPath, ext: extOfPath(wordPath) };
+  if (els.wordViewer && !els.wordViewer.hidden) {
+    const wordPath = (state.wordDoc && state.wordDoc.path) || state.activeNativePath || "";
+    if (wordPath) return { path: wordPath, ext: extOfPath(wordPath) };
+  }
+  if (els.excelViewer && !els.excelViewer.hidden) {
+    const excelPath = (state.excelWorkbook && state.excelWorkbook.path) || state.activeNativePath || "";
+    if (excelPath) return { path: excelPath, ext: extOfPath(excelPath) };
+  }
   if (state.activeTxtPath) return { path: state.activeTxtPath, ext: "TXT" };
   const page = (state.renderedPages || []).find((p) => {
     try { return pageKey(p) === state.activePageKey; } catch (_) { return false; }
@@ -4794,6 +4800,13 @@ els.excelSheetFrame.addEventListener("load", () => {
   if (!state.excelWorkbook) return;
   els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.excelScale }, "*");
 });
+if (els.wordDocFrame) {
+  els.wordDocFrame.addEventListener("load", () => {
+    forwardWordDocContextMenu();
+    if (!state.wordDoc) return;
+    els.wordDocFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.wordScale }, "*");
+  });
+}
 els.excelTabsLeft.addEventListener("click", () => {
   els.excelTabs.scrollBy({ left: -Math.max(180, els.excelTabs.clientWidth * .72), behavior: "smooth" });
 });
@@ -5230,11 +5243,36 @@ if (els.excelViewer) {
   });
 }
 
+if (els.wordViewer) {
+  els.wordViewer.addEventListener("contextmenu", (event) => {
+    if (event.target.closest("button, input, a, .excel-tabs, .excel-tabs-bar, .viewer-controls")) return;
+    const docPath = state.wordDoc?.path || state.activeNativePath || "";
+    if (!docPath) return;
+    event.preventDefault();
+    event.stopPropagation();
+    showFileContextMenu(event.clientX, event.clientY, {
+      path: docPath,
+      isDir: false,
+      ext: extOfPath(docPath),
+    });
+  });
+}
+
 window.addEventListener("message", (event) => {
   if (event.data?.type === "launcher-toggle-full-view") {
     setViewerMode(state.viewMode === "full" ? "standard" : "full");
   } else if (event.data?.type === "launcher-escape") {
     handleGlobalEscape();
+  } else if (event.data?.type === "launcher-contextmenu") {
+    const rect = els.wordDocFrame ? els.wordDocFrame.getBoundingClientRect() : { left: 0, top: 0 };
+    const x = rect.left + (event.data.clientX || 0);
+    const y = rect.top + (event.data.clientY || 0);
+    const info = getActiveSourceInfo();
+    const currentDoc = state.wordDoc;
+    const path = (info && info.path) || (currentDoc && currentDoc.path) || state.activeNativePath || "";
+    if (path) {
+      showFileContextMenu(x, y, { path, isDir: false, ext: extOfPath(path) });
+    }
   }
 });
 

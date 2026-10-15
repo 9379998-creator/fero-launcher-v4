@@ -2034,6 +2034,52 @@ def _find_visible_acad_window() -> tuple[int, int]:
         return 0, 0
 
 
+def _get_active_autocad_com():
+    """Подключиться к уже активному объекту AutoCAD через COM, перебирая известные ProgID."""
+    if os.name != "nt":
+        return None
+    try:
+        import win32com.client
+        for prog_id in (
+            "AutoCAD.Application",
+            "AutoCAD.Application.25",
+            "AutoCAD.Application.24.3",
+            "AutoCAD.Application.24.2",
+            "AutoCAD.Application.24.1",
+            "AutoCAD.Application.24.0",
+            "AutoCAD.Application.24",
+            "AutoCAD.Application.23.1",
+            "AutoCAD.Application.23",
+            "AutoCAD.Application.22",
+        ):
+            try:
+                acad = win32com.client.GetActiveObject(prog_id)
+                if acad:
+                    return acad
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _is_autocad_process_running() -> bool:
+    """Проверяет наличие живого процесса acad.exe в системе."""
+    if os.name != "nt":
+        return False
+    try:
+        res = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq acad.exe", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            **hidden_process_kwargs(),
+        )
+        return "acad.exe" in (res.stdout or "").lower()
+    except Exception:
+        return False
+
+
 def bring_native_window_to_front(pid: int, exe_path: str, timeout: float = 120.0) -> None:
     """Окно нативной программы — на передний план и на весь экран.
 
@@ -3816,7 +3862,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 now_ts = time.perf_counter()
                 with _OPEN_FILE_LOCK:
                     last_time = _LAST_OPENED_TARGETS.get(target_key, 0.0)
-                    if (now_ts - last_time) < 1.8:
+                    if (now_ts - last_time) < 4.0:
                         self.send_json(
                             HTTPStatus.OK,
                             {
@@ -3848,19 +3894,24 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
 
-                    # Проверяем, есть ли РЕАЛЬНОЕ открытое видимое окно AutoCAD у пользователя.
-                    # Подключаемся через COM ТОЛЬКО если видимое окно уже существует,
-                    # чтобы не цепляться к скрытым фоновым серверам и не плодить двойные процессы.
+                    # Проверяем, есть ли запущенный процесс или видимое окно AutoCAD у пользователя.
                     acad_opened = False
                     if os.name == "nt":
-                        try:
-                            user_hwnd, user_pid = _find_visible_acad_window()
-                            if user_hwnd > 0:
-                                import win32com.client
-                                acad = win32com.client.GetActiveObject("AutoCAD.Application")
+                        user_hwnd, user_pid = _find_visible_acad_window()
+                        acad_process_exists = (user_hwnd > 0) or _is_autocad_process_running()
+
+                        if acad_process_exists:
+                            # AutoCAD уже запущен на машине (в виде окна или процесса).
+                            # Ни в коем случае НЕ вызываем launch_custom_app("acad.exe"),
+                            # чтобы не плодить второй процесс acad.exe!
+                            try:
+                                acad = _get_active_autocad_com()
                                 if acad:
                                     acad_hwnd = getattr(acad, "HWND", 0) or user_hwnd
-                                    acad.Visible = True
+                                    try:
+                                        acad.Visible = True
+                                    except Exception:
+                                        pass
                                     try:
                                         acad.WindowState = 3  # acMax
                                     except Exception:
@@ -3870,7 +3921,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                                             _force_foreground(acad_hwnd, 3)
                                         except Exception:
                                             pass
-                                    else:
+                                    elif user_pid:
                                         bring_native_window_to_front(user_pid, "acad.exe")
 
                                     doc_already_open = False
@@ -3889,8 +3940,9 @@ class LauncherHandler(BaseHTTPRequestHandler):
                                             import pythoncom
                                             pythoncom.CoInitialize()
                                             try:
-                                                ac = win32com.client.GetActiveObject("AutoCAD.Application")
-                                                ac.Documents.Open(target_path_str)
+                                                ac = _get_active_autocad_com()
+                                                if ac:
+                                                    ac.Documents.Open(target_path_str)
                                                 if hwnd_val:
                                                     try:
                                                         _force_foreground(hwnd_val, 3)
@@ -3909,13 +3961,25 @@ class LauncherHandler(BaseHTTPRequestHandler):
                                         ).start()
 
                                     acad_opened = True
-                        except Exception as err:
-                            logger.warning("Could not connect to visible AutoCAD window: %s", err)
-                            acad_opened = False
+                                    mode = "autocad-active-com"
+                            except Exception as err:
+                                logger.warning("Could not connect via COM to active AutoCAD: %s", err)
 
-                    if acad_opened:
-                        mode = "autocad-active-com"
-                    else:
+                            if not acad_opened:
+                                # Если COM недоступен, но процесс/окно AutoCAD УЖЕ ЕСТЬ:
+                                # Запускаем файл через системную ассоциацию Windows (ShellExecuteW на САМ файл .dwg).
+                                # Windows Shell маршрутизирует документ в существующий экземпляр через DDE/AcLauncher
+                                # и НЕ создает второй независимый процесс acad.exe!
+                                if user_hwnd:
+                                    try:
+                                        _force_foreground(user_hwnd, 3)
+                                    except Exception:
+                                        pass
+                                _shell_open(str(target), "", os.path.dirname(str(target)))
+                                acad_opened = True
+                                mode = "autocad-shell-dde"
+
+                    if not acad_opened:
                         mode = launch_native_file(target)
                 elif action == "explorer":
                     mode = open_in_explorer(target)

@@ -220,6 +220,15 @@ window.addEventListener('dblclick', (e) => {{
   parent.postMessage({{ type: 'launcher-toggle-full-view' }}, '*');
 }});
 
+window.addEventListener('contextmenu', (e) => {{
+  e.preventDefault();
+  parent.postMessage({{
+    type: 'launcher-contextmenu',
+    clientX: e.clientX,
+    clientY: e.clientY
+  }}, '*');
+}});
+
 window.addEventListener('message', (e) => {{
   if (!e.data) return;
   if (e.data.type === 'launcher-sheet-zoom') {{
@@ -243,7 +252,7 @@ window.addEventListener('message', (e) => {{
     return html_page, stats
 
 
-WORD_ENGINE_VERSION = "v3"
+WORD_ENGINE_VERSION = "v4"
 
 
 def ensure_docx_preview(src: Path, cache_dir: Path) -> dict:
