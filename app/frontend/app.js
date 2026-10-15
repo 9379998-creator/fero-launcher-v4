@@ -161,14 +161,25 @@ function inTreeMode() {
 }
 
 function setMode(mode) {
-  els.objectListState.classList.toggle("active", mode === "objects");
-  els.treeState.classList.toggle("active", mode === "tree");
-  els.shell.classList.toggle("tree-browse", false);
-  if (els.backToTree) els.backToTree.disabled = true;
   if (mode === "objects") {
+    setViewerMode("standard");
+    setStageActive(false);
+    els.objectListState.classList.add("active");
+    els.treeState.classList.remove("active");
     els.pdfViewer.classList.add("empty");
     updateViewerBanner('Политика "Локальный компьютер"');
+    if (els.backToTree) {
+      els.backToTree.disabled = true;
+      els.backToTree.title = "Вернуться к предыдущему состоянию дерева";
+    }
+  } else {
+    els.objectListState.classList.remove("active");
+    els.treeState.classList.add("active");
+    if (els.backToTree) {
+      els.backToTree.disabled = false;
+    }
   }
+  els.shell.classList.toggle("tree-browse", false);
   updateObjectButtons();
 }
 
@@ -2285,6 +2296,7 @@ async function openSelectedObject() {
   const _piT0 = performance.now();
   state.pdfPairIndex = state.pairless ? null : buildPdfPairIndex(getCachedFlatNodes());
   beaconPerf("pair-index", performance.now() - _piT0, `files=${(manifest.statistics || {}).files || 0} pdf=${_pdfCount} pairless=${state.pairless}`);
+  setViewerMode("standard");
   setMode("tree");
   updateViewerBanner(manifest.name || object.name);
   setTreeBrowseMode(true);
@@ -4683,12 +4695,12 @@ els.exclude.addEventListener("click", () => {
 els.cancel.addEventListener("click", () => stopProgress(true));
 els.backToObjects.addEventListener("click", () => {
   stopDiffPolling();
+  setViewerMode("standard");
   setMode("objects");
   loadObjectSummaries().catch(() => {});
 });
 els.backToTree.addEventListener("click", () => {
-  if (!state.currentManifest?.tree) return;
-  if (state.viewMode === "full") {
+  if (state.viewMode === "full" || els.shell.classList.contains("full-view")) {
     setViewerMode("standard");
     if (state.excelWorkbooks?.length > 1 && els.excelViewer) {
       setStageActive(false);
@@ -5361,7 +5373,7 @@ function handleGlobalEscape() {
     return;
   }
   // 1. Из полноэкранного режима возвращаемся в стандартный режим с двумя полями
-  if (state.viewMode === "full") {
+  if (state.viewMode === "full" || els.shell.classList.contains("full-view")) {
     setViewerMode("standard");
     if (state.excelWorkbooks?.length > 1 && els.excelViewer) {
       setStageActive(false);
@@ -5416,6 +5428,7 @@ function handleGlobalEscape() {
     }
     // 2.4. Если в дереве ничего не выбрано — выходим назад к списку объектов!
     stopDiffPolling();
+    setViewerMode("standard");
     setMode("objects");
     return;
   }
