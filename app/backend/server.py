@@ -1362,7 +1362,7 @@ def normalize_file_extension(ext_or_path: str | Path) -> str:
 
 
 SAFE_EXECUTABLE_EXTENSIONS = {".exe", ".cmd", ".bat", ".com"}
-FORBIDDEN_AUTODETECT_EXES = {"aclauncher.exe", "zwlauncher.exe"}
+FORBIDDEN_AUTODETECT_EXES: set[str] = set()
 
 
 def _clean_configured_exe_path(raw: str) -> str:
@@ -1661,10 +1661,9 @@ def import_windows_default_app_mappings(
         # Опрашиваем ассоциацию Windows
         detected_exe = detect_windows_app_for_ext(norm_ext)
 
-        # Для DWG/DXF строгий запрет на AcLauncher и ZwLauncher
-        if norm_ext in {".dwg", ".dxf"}:
-            if Path(detected_exe).name.casefold() in FORBIDDEN_AUTODETECT_EXES:
-                detected_exe = ""
+        # Для DWG/DXF приоритетно используем официальный AcLauncher
+        if norm_ext in {".dwg", ".dxf"} and not detected_exe:
+            detected_exe = _get_autocad_launcher_exe()
 
         is_candidate_usable, clean_candidate = validate_configured_executable(detected_exe)
 
@@ -2017,6 +2016,20 @@ def kill_orphan_acad_processes() -> None:
         )
     except Exception:
         pass
+
+
+def _get_autocad_launcher_exe() -> str:
+    """Возвращает путь к официальному AcLauncher.exe (AutoCAD DWG Launcher), если он есть на машине."""
+    if os.name != "nt":
+        return ""
+    candidates = [
+        r"C:\Program Files\Common Files\Autodesk Shared\AcShellEx\AcLauncher.exe",
+        r"C:\Program Files (x86)\Common Files\Autodesk Shared\AcShellEx\AcLauncher.exe",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return ""
 
 
 def _find_visible_acad_window(cad_exe: str = "") -> tuple[int, int]:
@@ -2443,10 +2456,41 @@ def launch_custom_app(exe_path: str, file_path: Path) -> str:
     resolved_file = os.path.normpath(str(file_path.resolve()))
     resolved_exe = os.path.normpath(str(Path(exe_path).resolve()))
     file_dir = os.path.dirname(resolved_file)
+    norm_ext = normalize_file_extension(file_path)
 
     if os.name != "nt":
         subprocess.Popen([resolved_exe, resolved_file], cwd=file_dir)
         return f"custom-app:{Path(resolved_exe).name}"
+
+    # Для DWG/DXF или если указан AutoCAD (acad.exe / AcLauncher.exe):
+    # Прямой запуск acad.exe из командной строки порождает 2 копии процесса (вторую создаёт DDE-интеграция).
+    # Для AutoCAD ВСЕГДА следует использовать официальный AcLauncher.exe с ключом /O.
+    exe_name = Path(resolved_exe).name.casefold()
+    if norm_ext in (".dwg", ".dxf") or exe_name in ("acad.exe", "aclauncher.exe"):
+        ac_launcher = _get_autocad_launcher_exe()
+        if ac_launcher:
+            resolved_exe = ac_launcher
+            params = f'/O "{resolved_file}"'
+            if _shell_open(resolved_exe, params, file_dir):
+                bring_native_window_to_front(0, "acad.exe")
+                _bring_window_to_front(None, None, 120.0, file_path.name, 3)
+                return "custom-app:AcLauncher.exe"
+            try:
+                creationflags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                proc = subprocess.Popen(
+                    [resolved_exe, "/O", resolved_file],
+                    cwd=file_dir,
+                    creationflags=creationflags,
+                )
+                bring_native_window_to_front(proc.pid, "acad.exe")
+                _bring_window_to_front(None, None, 120.0, file_path.name, 3)
+                return "custom-app:AcLauncher.exe"
+            except Exception as err:
+                raise NativeOpenError(
+                    f"Не удалось запустить приложение {resolved_exe}: {err}",
+                    error_code="custom_app_launch_failed",
+                    details={"exe": resolved_exe, "file": resolved_file, "error": str(err)},
+                )
 
     # 1. ShellExecuteW("open", resolved_exe, f'"{resolved_file}"', file_dir, SW_SHOWNORMAL=1)
     if _shell_open(resolved_exe, f'"{resolved_file}"', file_dir):
@@ -2487,6 +2531,17 @@ def launch_native_file(path: Path) -> str:
         return open_in_explorer(path)
 
     norm_ext = normalize_file_extension(path)
+
+    # Для DWG/DXF на Windows приоритетно используем официальный AcLauncher.exe
+    if os.name == "nt" and norm_ext in (".dwg", ".dxf"):
+        ac_launcher = _get_autocad_launcher_exe()
+        if ac_launcher:
+            target_dir = os.path.dirname(str(path.resolve()))
+            if _shell_open(ac_launcher, f'/O "{str(path.resolve())}"', target_dir):
+                bring_native_window_to_front(0, "acad.exe")
+                _bring_window_to_front(None, None, 120.0, path.name, 3)
+                return "custom-app:AcLauncher.exe"
+
     cfg = load_native_apps_config()
     use_native = bool(cfg.get("useNativeApps", True))
 
@@ -3952,7 +4007,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                         DwgOnDemandManager.stop_all_workers()
                     except Exception:
                         pass
-                    kill_orphan_acad_processes()
+                    threading.Thread(target=kill_orphan_acad_processes, daemon=True).start()
 
                     acad_opened = False
                     if os.name == "nt":
@@ -4025,9 +4080,23 @@ class LauncherHandler(BaseHTTPRequestHandler):
                                 logger.warning("Could not connect via COM to active AutoCAD: %s", err)
 
                             if not acad_opened:
+                                ac_launcher = _get_autocad_launcher_exe()
+                                if ac_launcher:
+                                    target_dir = os.path.dirname(str(target.resolve()))
+                                    _shell_open(ac_launcher, f'/O "{str(target.resolve())}"', target_dir)
                                 _force_foreground(user_hwnd, 3)
                                 acad_opened = True
                                 mode = "autocad-active-window"
+
+                    if not acad_opened:
+                        ac_launcher = _get_autocad_launcher_exe()
+                        if ac_launcher:
+                            target_dir = os.path.dirname(str(target.resolve()))
+                            if _shell_open(ac_launcher, f'/O "{str(target.resolve())}"', target_dir):
+                                bring_native_window_to_front(0, "acad.exe")
+                                _bring_window_to_front(None, None, 120.0, target.name, 3)
+                                mode = "autocad-launcher-open"
+                                acad_opened = True
 
                     if not acad_opened:
                         mode = launch_native_file(target)
