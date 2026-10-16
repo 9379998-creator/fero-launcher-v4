@@ -3676,6 +3676,11 @@ function showPdfPage(page, options = {}) {
   if (els.txtViewer) els.txtViewer.hidden = true;
   state.activeTxtPath = "";
   if (els.wordViewer) els.wordViewer.hidden = true;
+  if (els.mediaVideoViewer && page?.previewType !== "VIDEO") {
+    try { els.mediaVideoViewer.pause(); } catch (_) {}
+    els.mediaVideoViewer.hidden = true;
+    els.mediaVideoViewer.removeAttribute("src");
+  }
 
   if (page.previewType === "IMAGE") {
     clearExcelViewer();

@@ -1075,6 +1075,7 @@ textarea:focus {
   min-height: 0;
   overflow: hidden;
   padding: 14px;
+  background: #ffffff;
 }
 
 .ribbon-load-more {
@@ -1230,6 +1231,7 @@ textarea:focus {
   overflow: hidden;
   padding: 14px;
   user-select: none;
+  background: #ffffff;
 }
 
 .pdf-stage img, .pdf-stage canvas {
@@ -1248,6 +1250,19 @@ textarea:focus {
 }
 
 .pdf-stage img[hidden], .pdf-stage canvas[hidden] {
+  display: none !important;
+}
+
+#mediaVideoViewer {
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  display: block;
+  outline: none;
+  border-radius: 4px;
+}
+
+#mediaVideoViewer[hidden] {
   display: none !important;
 }
 

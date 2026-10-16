@@ -102,12 +102,12 @@ def _generate_placeholder_png(dwg_name: str, layout_name: str = "Model") -> byte
     try:
         from PIL import Image, ImageDraw
 
-        img = Image.new("RGB", (800, 500), color=(26, 30, 38))
+        img = Image.new("RGB", (800, 500), color=(255, 255, 255))
         draw = ImageDraw.Draw(img)
-        draw.rectangle([(10, 10), (790, 490)], outline=(58, 66, 82), width=2)
-        draw.text((40, 200), f"AutoCAD DWG: {dwg_name}", fill=(240, 240, 240))
-        draw.text((40, 240), f"Layout: {layout_name}", fill=(160, 175, 195))
-        draw.text((40, 280), "Embedded preview not present in DWG header", fill=(120, 130, 145))
+        draw.rectangle([(10, 10), (790, 490)], outline=(212, 215, 220), width=2)
+        draw.text((40, 200), f"AutoCAD DWG: {dwg_name}", fill=(30, 41, 59))
+        draw.text((40, 240), f"Layout: {layout_name}", fill=(100, 116, 139))
+        draw.text((40, 280), "Embedded preview not present in DWG header", fill=(148, 163, 184))
         out = io.BytesIO()
         img.save(out, format="PNG")
         return out.getvalue()
