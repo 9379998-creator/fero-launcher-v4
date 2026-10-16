@@ -19,6 +19,7 @@ const state = {
   progressCancelled: false,
   renderEpoch: 0,
   activeTxtPath: "",
+  passportActive: false,
   operationController: null,
   operationControllers: [],
   renderedPages: [],
@@ -141,7 +142,11 @@ const els = {
   settingsOpenWinSettingsBtn: document.getElementById("settingsOpenWinSettingsBtn"),
   settingsDwgHint: document.getElementById("settingsDwgHint"),
   settingsSaveBtn: document.getElementById("settingsSaveBtn"),
-
+  btnVolumes: document.getElementById("btnVolumes"),
+  btnBudget: document.getElementById("btnBudget"),
+  btnPassport: document.getElementById("btnPassport"),
+  passportViewer: document.getElementById("passportViewer"),
+  passportFrame: document.getElementById("passportFrame"),
 };
 
 function text(value, fallback = "") {
@@ -163,6 +168,11 @@ function inTreeMode() {
 
 function setMode(mode) {
   if (mode === "objects") {
+    if (state.passportActive) {
+      state.passportActive = false;
+      if (els.passportViewer) els.passportViewer.hidden = true;
+      if (els.passportFrame) els.passportFrame.src = "about:blank";
+    }
     setViewerMode("standard");
     setStageActive(false);
     els.objectListState.classList.add("active");
@@ -185,6 +195,9 @@ function setMode(mode) {
 }
 
 function inWindow3() {
+  if (state.passportActive) {
+    return true;
+  }
   if (state.viewMode === "full" || els.shell.classList.contains("full-view")) {
     return true;
   }
@@ -195,6 +208,11 @@ function inWindow3() {
 }
 
 function exitWindow3() {
+  if (state.passportActive) {
+    state.passportActive = false;
+    if (els.passportViewer) els.passportViewer.hidden = true;
+    if (els.passportFrame) els.passportFrame.src = "about:blank";
+  }
   if (state.viewMode === "full" || els.shell.classList.contains("full-view")) {
     setViewerMode("standard");
   }
@@ -209,6 +227,33 @@ function exitWindow3() {
   } else if (state.excelWorkbooks?.length > 1) {
     renderExcelWorkbookRail();
   }
+  updateObjectButtons();
+}
+
+function showPassportView(tabName = "tab-reconcile") {
+  const objectId = state.selectedObjectId;
+  if (!objectId) return;
+
+  state.passportActive = true;
+  setStageActive(true);
+
+  if (els.pdfPageImage) els.pdfPageImage.hidden = true;
+  if (els.pdfPageCanvas) els.pdfPageCanvas.hidden = true;
+  if (els.txtViewer) els.txtViewer.hidden = true;
+  if (els.excelViewer) els.excelViewer.hidden = true;
+  if (els.wordViewer) els.wordViewer.hidden = true;
+  if (els.mediaVideoViewer) els.mediaVideoViewer.hidden = true;
+  if (els.viewerEmpty) els.viewerEmpty.hidden = true;
+  if (els.qualityBadge) els.qualityBadge.hidden = true;
+  if (els.pagePosition) els.pagePosition.hidden = true;
+  if (els.viewerControls) els.viewerControls.hidden = true;
+
+  if (els.passportViewer) els.passportViewer.hidden = false;
+  if (els.passportFrame) {
+    const targetUrl = `/api/budget/passport?id=${encodeURIComponent(objectId)}#${encodeURIComponent(tabName)}`;
+    els.passportFrame.src = targetUrl;
+  }
+
   updateObjectButtons();
 }
 
@@ -234,6 +279,9 @@ function updateObjectButtons() {
     if (els.display) els.display.disabled = true;
     if (els.exclude) els.exclude.disabled = true;
     if (els.btnSettings) els.btnSettings.disabled = true;
+    if (els.btnVolumes) els.btnVolumes.disabled = true;
+    if (els.btnBudget) els.btnBudget.disabled = true;
+    if (els.btnPassport) els.btnPassport.disabled = true;
   } else if (tree) {
     // В первых двух окнах (Окно 1 дерево + Окно 2 лента миниатюр):
     // Кнопка «Назад» неактивна (возвращаться некуда).
@@ -251,6 +299,9 @@ function updateObjectButtons() {
     if (els.display) els.display.disabled = false;
     if (els.exclude) els.exclude.disabled = false;
     if (els.btnSettings) els.btnSettings.disabled = false;
+    if (els.btnVolumes) els.btnVolumes.disabled = false;
+    if (els.btnBudget) els.btnBudget.disabled = false;
+    if (els.btnPassport) els.btnPassport.disabled = false;
   } else {
     // В списке объектов (начальный экран):
     // Кнопка «Назад» неактивна. Кнопка «Объекты» неактивна (уже в объектах).
@@ -267,6 +318,9 @@ function updateObjectButtons() {
     if (els.display) els.display.disabled = !hasSelection;
     if (els.exclude) els.exclude.disabled = !hasSelection;
     if (els.btnSettings) els.btnSettings.disabled = false;
+    if (els.btnVolumes) els.btnVolumes.disabled = !hasSelection;
+    if (els.btnBudget) els.btnBudget.disabled = !hasSelection;
+    if (els.btnPassport) els.btnPassport.disabled = !hasSelection;
   }
 }
 
@@ -4935,6 +4989,9 @@ els.display.addEventListener("click", () => {
   if (inTreeMode()) renderSelectedFiles().catch(showOperationError);
   else openSelectedObject().catch(showOperationError);
 });
+if (els.btnVolumes) els.btnVolumes.addEventListener("click", () => showPassportView("tab-reconcile"));
+if (els.btnBudget) els.btnBudget.addEventListener("click", () => showPassportView("tab-estimate"));
+if (els.btnPassport) els.btnPassport.addEventListener("click", () => showPassportView("tab-reconcile"));
 els.exclude.addEventListener("click", () => {
   stopDiffPolling();
   excludeSelectedObject().catch(showOperationError);

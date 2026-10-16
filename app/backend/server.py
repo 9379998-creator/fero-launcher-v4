@@ -457,6 +457,40 @@ def list_object_summaries() -> list[dict]:
     return sorted(manifests, key=lambda item: str(item.get("scannedAt", "")), reverse=True)
 
 
+def resolve_project_root_info(obj_id: str) -> tuple[int, Path, str]:
+    """Разрешает идентификатор объекта (manifest id или root_id) в (root_id, Path, project_name)."""
+    from app.backend import db as db_mod
+
+    conn = db_mod.get_connection()
+    try:
+        if str(obj_id).isdigit():
+            row = conn.execute("SELECT id, path, project_name FROM roots WHERE id = ?", (int(obj_id),)).fetchone()
+            if row:
+                p = Path(row["path"])
+                name = row["project_name"] or p.name
+                return (row["id"], p, name)
+
+        manifest = load_manifest(str(obj_id))
+        if manifest and manifest.get("rootPath"):
+            p = Path(manifest["rootPath"])
+            name = manifest.get("name") or p.name
+            root_id = db_mod.sync_root_to_db(p)
+            return (root_id, p, name)
+
+        row = conn.execute(
+            "SELECT id, path, project_name FROM roots WHERE path LIKE ? OR id = ?",
+            (f"%{obj_id}%", str(obj_id)),
+        ).fetchone()
+        if row:
+            p = Path(row["path"])
+            name = row["project_name"] or p.name
+            return (row["id"], p, name)
+
+        raise ValueError(f"Не удалось найти объект по идентификатору: {obj_id}")
+    finally:
+        conn.close()
+
+
 def pdf_cache_key(path: Path, dpi: int = 0) -> str:
     stat = path.stat()
     dpi_tag = f"|dpi={dpi}" if dpi and dpi != DEFAULT_PDF_DPI else ""
@@ -3445,6 +3479,129 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, manifest)
             else:
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "Объект не найден в manifest-хранилище"})
+            return
+
+        if parsed.path == "/api/volumes":
+            try:
+                params = parse_qs(parsed.query)
+                obj_id = params.get("id", [""])[0].strip() or params.get("root_id", [""])[0].strip()
+                if not obj_id:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Missing id or root_id parameter")
+                    return
+                root_id, root_path, project_name = resolve_project_root_info(obj_id)
+                from app.backend import db as db_mod
+                from app.backend import volume_engine
+                conn = db_mod.get_connection()
+                try:
+                    db_mod.init_db()
+                    recs = volume_engine.calculate_or_get_reconciliations(conn, root_id, root_path)
+                    self.send_json(HTTPStatus.OK, {
+                        "status": "ok",
+                        "root_id": root_id,
+                        "project_name": project_name,
+                        "reconciliations": recs,
+                    })
+                finally:
+                    conn.close()
+            except ValueError as err:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": str(err)})
+            except Exception as err:
+                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(err)})
+            return
+
+        if parsed.path == "/api/budget":
+            try:
+                params = parse_qs(parsed.query)
+                obj_id = params.get("id", [""])[0].strip() or params.get("root_id", [""])[0].strip()
+                if not obj_id:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Missing id or root_id parameter")
+                    return
+                root_id, root_path, project_name = resolve_project_root_info(obj_id)
+                from app.backend import db as db_mod
+                from app.backend import volume_engine, budget_generator
+                conn = db_mod.get_connection()
+                try:
+                    db_mod.init_db()
+                    volume_engine.calculate_or_get_reconciliations(conn, root_id, root_path)
+                    estimate = budget_generator.calculate_estimate_for_root(conn, root_id, f"Первоначальный бюджет {project_name}")
+                    self.send_json(HTTPStatus.OK, {
+                        "status": "ok",
+                        "root_id": root_id,
+                        "project_name": project_name,
+                        "estimate": estimate,
+                    })
+                finally:
+                    conn.close()
+            except ValueError as err:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": str(err)})
+            except Exception as err:
+                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(err)})
+            return
+
+        if parsed.path == "/api/budget/passport":
+            try:
+                params = parse_qs(parsed.query)
+                obj_id = params.get("id", [""])[0].strip() or params.get("root_id", [""])[0].strip()
+                if not obj_id:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Missing id or root_id parameter")
+                    return
+                root_id, root_path, project_name = resolve_project_root_info(obj_id)
+                from app.backend import db as db_mod
+                from app.backend import volume_engine, budget_generator
+                conn = db_mod.get_connection()
+                try:
+                    db_mod.init_db()
+                    recs = volume_engine.calculate_or_get_reconciliations(conn, root_id, root_path)
+                    estimate = budget_generator.calculate_estimate_for_root(conn, root_id, f"Первоначальный бюджет {project_name}")
+                    html_content = budget_generator.generate_facade_passport_html(project_name, estimate, recs)
+                    body = html_content.encode("utf-8")
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self._apply_cors_headers()
+                    self.end_headers()
+                    self.wfile.write(body)
+                finally:
+                    conn.close()
+            except ValueError as err:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": str(err)})
+            except Exception as err:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"Passport error: {err}")
+            return
+
+        if parsed.path == "/api/budget/export-csv":
+            try:
+                params = parse_qs(parsed.query)
+                obj_id = params.get("id", [""])[0].strip() or params.get("root_id", [""])[0].strip()
+                if not obj_id:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Missing id or root_id parameter")
+                    return
+                root_id, root_path, project_name = resolve_project_root_info(obj_id)
+                from app.backend import db as db_mod
+                from app.backend import volume_engine, budget_generator
+                from urllib.parse import quote
+                conn = db_mod.get_connection()
+                try:
+                    db_mod.init_db()
+                    volume_engine.calculate_or_get_reconciliations(conn, root_id, root_path)
+                    estimate = budget_generator.calculate_estimate_for_root(conn, root_id, f"Первоначальный бюджет {project_name}")
+                    csv_text = budget_generator.export_estimate_to_csv(estimate)
+                    body = csv_text.encode("utf-8")
+                    filename = f"Ведомость_объемов_работ_{project_name}.csv"
+                    safe_filename = quote(filename)
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "text/csv; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{safe_filename}")
+                    self._apply_cors_headers()
+                    self.end_headers()
+                    self.wfile.write(body)
+                finally:
+                    conn.close()
+            except ValueError as err:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": str(err)})
+            except Exception as err:
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"CSV export error: {err}")
             return
 
         if parsed.path.startswith("/cache/"):

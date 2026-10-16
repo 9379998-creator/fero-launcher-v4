@@ -15,6 +15,9 @@
       <button id="refreshObject" type="button" disabled title="Проверить выбранный объект заново: сравнить с предыдущим сканом и показать добавленные, изменённые и удалённые файлы без потери контекста.">Обновить</button>
       <button id="displayObject" type="button" disabled title="Открыть выбранный объект: показать дерево, поиск и фильтры файлов.">Отобразить</button>
       <button id="backToTree" type="button" disabled title="Вернуться к предыдущему состоянию дерева">Назад</button>
+      <button id="btnVolumes" type="button" disabled title="📊 Расчет и сверка объемов фасадов (Векторный PDF vs CAD DWG)">📊 Объемы</button>
+      <button id="btnBudget" type="button" disabled title="💰 Первоначальный коммерческий бюджет и смета фасадов">💰 Бюджет</button>
+      <button id="btnPassport" type="button" disabled title="📑 Инженерный паспорт фасадов объекта с калькулятором и экспортом">📑 Паспорт</button>
       <button id="btnSettings" type="button" title="Параметры лаунчера и ассоциации программ">Параметры</button>
       <button id="excludeObject" type="button" disabled title="Убрать объект из списка Launcher. Исходная папка не удаляется.">Исключить</button>
       <div class="scale-widget" id="scaleWidget" title="Масштаб отображения. Нажмите 100% для возврата к исходному состоянию">
@@ -147,6 +150,9 @@
           </section>
           <section class="excel-viewer word-viewer" id="wordViewer" hidden aria-label="Просмотр Word-документа">
             <iframe class="excel-sheet-frame word-doc-frame" id="wordDocFrame" title="Документ Word" loading="lazy"></iframe>
+          </section>
+          <section class="excel-viewer passport-viewer" id="passportViewer" hidden aria-label="Инженерный паспорт фасадов и сметы">
+            <iframe class="excel-sheet-frame passport-frame" id="passportFrame" title="Паспорт фасадов" loading="lazy" style="width:100%; height:100%; border:none; background:#e9ebeb;"></iframe>
           </section>
           <div class="viewer-controls" id="viewerControls" hidden>
             <button id="viewZoomOut" type="button" title="Уменьшить">−</button>

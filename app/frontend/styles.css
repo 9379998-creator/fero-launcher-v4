@@ -1041,7 +1041,7 @@ textarea:focus {
   display: none !important;
 }
 
-.shell:not(.full-view) .pdf-viewer .pdf-stage:not(:has(.excel-viewer:not([hidden]))):not(:has(#wordViewer:not([hidden]))) {
+.shell:not(.full-view) .pdf-viewer .pdf-stage:not(:has(.excel-viewer:not([hidden]))):not(:has(#wordViewer:not([hidden]))):not(:has(#passportViewer:not([hidden]))) {
   display: none !important;
 }
 
@@ -1054,7 +1054,8 @@ textarea:focus {
 }
 
 .shell:not(.full-view) .pdf-viewer .pdf-stage:has(.excel-viewer:not([hidden])),
-.shell:not(.full-view) .pdf-viewer .pdf-stage:has(#wordViewer:not([hidden])) {
+.shell:not(.full-view) .pdf-viewer .pdf-stage:has(#wordViewer:not([hidden])),
+.shell:not(.full-view) .pdf-viewer .pdf-stage:has(#passportViewer:not([hidden])) {
   display: block !important;
   position: relative;
   width: 100%;
@@ -1285,6 +1286,29 @@ textarea:focus {
 }
 
 .word-doc-frame {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  display: block;
+}
+
+#passportViewer.passport-viewer {
+  display: block;
+  grid-template-rows: none;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+#passportViewer.passport-viewer[hidden] {
+  display: none !important;
+}
+
+.passport-frame {
   width: 100%;
   height: 100%;
   min-width: 0;

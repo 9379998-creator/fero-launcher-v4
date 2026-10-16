@@ -116,6 +116,88 @@ def _create_unit_rates(cursor) -> None:
     )
 
 
+def _create_estimates(cursor) -> None:
+    """
+    Создаёт таблицы estimates и estimate_rows в целевой схеме.
+    Если таблицы пустые и в legacy-схеме — безопасно пересоздаются.
+    """
+    if not _table_exists(cursor, "estimates"):
+        cursor.execute("""
+            CREATE TABLE estimates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                root_id INTEGER,
+                name TEXT,
+                project_name TEXT,
+                total_price REAL DEFAULT 0.0,
+                total_materials_no_vat REAL NOT NULL DEFAULT 0.0,
+                total_smr_no_vat REAL NOT NULL DEFAULT 0.0,
+                total_cost_no_vat REAL NOT NULL DEFAULT 0.0,
+                vat_22 REAL NOT NULL DEFAULT 0.0,
+                total_cost_with_vat REAL NOT NULL DEFAULT 0.0,
+                avg_price_per_m2 REAL NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'ready',
+                created_at TEXT NOT NULL
+            )
+        """)
+    else:
+        columns = _table_columns(cursor, "estimates")
+        if "root_id" not in columns:
+            cursor.execute("SELECT COUNT(*) FROM estimates")
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("DROP TABLE estimates")
+                _create_estimates(cursor)
+                return
+            else:
+                _add_columns(cursor, "estimates", [
+                    ("root_id", "INTEGER"),
+                    ("name", "TEXT"),
+                    ("total_materials_no_vat", "REAL DEFAULT 0.0"),
+                    ("total_smr_no_vat", "REAL DEFAULT 0.0"),
+                    ("total_cost_no_vat", "REAL DEFAULT 0.0"),
+                    ("vat_22", "REAL DEFAULT 0.0"),
+                    ("total_cost_with_vat", "REAL DEFAULT 0.0"),
+                    ("avg_price_per_m2", "REAL DEFAULT 0.0"),
+                ])
+
+    if not _table_exists(cursor, "estimate_rows"):
+        cursor.execute("""
+            CREATE TABLE estimate_rows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                estimate_id INTEGER NOT NULL,
+                reconciliation_id INTEGER,
+                unit_rate_id INTEGER,
+                quantity REAL NOT NULL DEFAULT 0.0,
+                material_cost REAL NOT NULL DEFAULT 0.0,
+                smr_cost REAL NOT NULL DEFAULT 0.0,
+                total_row_cost_no_vat REAL NOT NULL DEFAULT 0.0,
+                total_row_cost_with_vat REAL NOT NULL DEFAULT 0.0,
+                specification_item_id INTEGER,
+                snapshot_price_per_unit REAL,
+                snapshot_quantity REAL,
+                computed_cost REAL,
+                FOREIGN KEY (estimate_id) REFERENCES estimates(id) ON DELETE CASCADE
+            )
+        """)
+    else:
+        columns = _table_columns(cursor, "estimate_rows")
+        if "reconciliation_id" not in columns:
+            cursor.execute("SELECT COUNT(*) FROM estimate_rows")
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("DROP TABLE estimate_rows")
+                _create_estimates(cursor)
+                return
+            else:
+                _add_columns(cursor, "estimate_rows", [
+                    ("reconciliation_id", "INTEGER"),
+                    ("unit_rate_id", "INTEGER"),
+                    ("quantity", "REAL DEFAULT 0.0"),
+                    ("material_cost", "REAL DEFAULT 0.0"),
+                    ("smr_cost", "REAL DEFAULT 0.0"),
+                    ("total_row_cost_no_vat", "REAL DEFAULT 0.0"),
+                    ("total_row_cost_with_vat", "REAL DEFAULT 0.0"),
+                ])
+
+
 def migrate_schema(conn: sqlite3.Connection) -> dict:
     """
     Идемпотентная миграция схемы под Шаг 1 (объёмы, расценки, сметы).
@@ -177,26 +259,7 @@ def migrate_schema(conn: sqlite3.Connection) -> dict:
         report["created_tables"].append("volume_reconciliations")
 
     # --- 6. Сметы (первоначальный бюджет) ---
-    report["added_columns"]["estimates"] = _add_columns(cursor, "estimates", [
-        ("root_id", "INTEGER"),
-        ("name", "TEXT"),
-        ("total_materials_no_vat", "REAL DEFAULT 0.0"),
-        ("total_smr_no_vat", "REAL DEFAULT 0.0"),
-        ("total_cost_no_vat", "REAL DEFAULT 0.0"),
-        ("vat_22", "REAL DEFAULT 0.0"),
-        ("total_cost_with_vat", "REAL DEFAULT 0.0"),
-        ("avg_price_per_m2", "REAL DEFAULT 0.0"),
-    ])
-
-    report["added_columns"]["estimate_rows"] = _add_columns(cursor, "estimate_rows", [
-        ("reconciliation_id", "INTEGER"),
-        ("unit_rate_id", "INTEGER"),
-        ("quantity", "REAL"),
-        ("material_cost", "REAL"),
-        ("smr_cost", "REAL"),
-        ("total_row_cost_no_vat", "REAL"),
-        ("total_row_cost_with_vat", "REAL"),
-    ])
+    _create_estimates(cursor)
 
     # --- Индексы для будущих выборок Шага 2/3 ---
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_documents_root ON documents(root_id)")
@@ -299,25 +362,6 @@ def init_db():
             FOREIGN KEY (specification_id) REFERENCES specifications(id) ON DELETE CASCADE,
             FOREIGN KEY (parsed_element_id) REFERENCES parsed_elements(id),
             FOREIGN KEY (unit_rate_id) REFERENCES unit_rates(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS estimates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_name TEXT NOT NULL,
-            total_price REAL NOT NULL DEFAULT 0.0,
-            status TEXT NOT NULL DEFAULT 'draft',
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS estimate_rows (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            estimate_id INTEGER NOT NULL,
-            specification_item_id INTEGER NOT NULL,
-            snapshot_price_per_unit REAL NOT NULL,
-            snapshot_quantity REAL NOT NULL,
-            computed_cost REAL NOT NULL,
-            FOREIGN KEY (estimate_id) REFERENCES estimates(id) ON DELETE CASCADE,
-            FOREIGN KEY (specification_item_id) REFERENCES specification_items(id)
         );
         """)
         conn.commit()
