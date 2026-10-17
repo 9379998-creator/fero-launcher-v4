@@ -1,7 +1,13 @@
 Set WshShell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 strDir = fso.GetParentFolderName(WScript.ScriptFullName)
-strCmd = fso.BuildPath(strDir, fso.GetBaseName(WScript.ScriptFullName) & ".cmd")
+strPyw = "pythonw.exe"
+
+If fso.FileExists(strDir & "\runtime\python\pythonw.exe") Then
+    strPyw = strDir & "\runtime\python\pythonw.exe"
+ElseIf fso.FileExists("C:\Python314\pythonw.exe") Then
+    strPyw = "C:\Python314\pythonw.exe"
+End If
+
 WshShell.CurrentDirectory = strDir
-WshShell.Environment("PROCESS")("FENG_SILENT") = "1"
-WshShell.Run "cmd /c """"" & strCmd & """""", 0, False
+WshShell.Run """" & strPyw & """ """ & strDir & "\app\flauncher.pyw""", 0, False

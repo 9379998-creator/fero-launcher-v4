@@ -1,38 +1,64 @@
 import os
 import ctypes
-import win32com.client
+import subprocess
 
-def fix_shortcut():
-    sh = win32com.client.Dispatch("WScript.Shell")
-    desktop = os.path.expanduser("~/Desktop")
-    programs = os.path.expanduser(r"~\AppData\Roaming\Microsoft\Windows\Start Menu\Programs")
-    
-    repo_root = os.path.abspath(r"C:\Users\a9379\.gemini\antigravity\scratch\fero-launcher-v4")
-    vbs_path = os.path.join(repo_root, "run_launcher.vbs")
+def fix_shortcuts():
+    repo_root = r"C:\Users\a9379\.gemini\antigravity\scratch\fero-launcher-v4"
+    vbs_path = os.path.join(repo_root, "Запуск_Лаунчера.vbs")
     ico_path = os.path.join(repo_root, "app", "frontend", "assets", "flauncher.ico")
     
-    for folder in [desktop, programs]:
-        if not os.path.exists(folder):
-            continue
-        lnk_path = os.path.join(folder, "F-Engineering Launcher.lnk")
-        sc = sh.CreateShortcut(lnk_path)
-        sc.TargetPath = r"C:\Windows\System32\wscript.exe"
-        sc.Arguments = f'"{vbs_path}"'
-        sc.WorkingDirectory = repo_root
-        sc.Description = "F.E.R.O. Launcher v4"
-        sc.IconLocation = f"{ico_path},0"
-        sc.Save()
+    ps_cmd = f'''
+    $sh = New-Object -ComObject WScript.Shell
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $programs = [Environment]::GetFolderPath('Programs')
+    $startMenu = [Environment]::GetFolderPath('StartMenu')
+    
+    $targetPath = 'wscript.exe'
+    $targetArgs = '"{vbs_path}"'
+    
+    $folders = @($desktop, $programs, $startMenu)
+    foreach ($dir in $folders) {{
+        if ($dir -and (Test-Path $dir)) {{
+            $links = Get-ChildItem -Path $dir -Filter "*.lnk" -ErrorAction SilentlyContinue
+            foreach ($lnk in $links) {{
+                if ($lnk.Name -like "*F-Engineering*" -or $lnk.Name -like "*FERO*" -or $lnk.Name -like "*launcher*" -or $lnk.Name -like "*лаунчер*") {{
+                    Write-Host "Updating shortcut: $($lnk.FullName)"
+                    $sc = $sh.CreateShortcut($lnk.FullName)
+                    $sc.TargetPath = $targetPath
+                    $sc.Arguments = $targetArgs
+                    $sc.WorkingDirectory = '{repo_root}'
+                    $sc.Description = "F.E.R.O. Launcher v4"
+                    $sc.IconLocation = "{ico_path},0"
+                    $sc.Save()
+                    Write-Host "  New Target: $($sc.TargetPath) $($sc.Arguments)"
+                    Write-Host "  New Icon:   $($sc.IconLocation)"
+                }}
+            }}
+            
+            if ($dir -eq $desktop) {{
+                $deskLnk = Join-Path $desktop "F-Engineering Launcher.lnk"
+                $sc = $sh.CreateShortcut($deskLnk)
+                $sc.TargetPath = $targetPath
+                $sc.Arguments = $targetArgs
+                $sc.WorkingDirectory = '{repo_root}'
+                $sc.Description = "F.E.R.O. Launcher v4"
+                $sc.IconLocation = "{ico_path},0"
+                $sc.Save()
+                Write-Host "Ensured primary desktop shortcut: $deskLnk"
+            }}
+        }}
+    }}
+    '''
+    res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    print(res.stdout)
+    if res.stderr:
+        print("STDERR:", res.stderr)
         
-        # Verify
-        sc_check = sh.CreateShortcut(lnk_path)
-        print(f"Updated shortcut at: {lnk_path}")
-        print(f"  Target: {sc_check.TargetPath}")
-        print(f"  Args:   {sc_check.Arguments}")
-        print(f"  Icon:   {sc_check.IconLocation}")
-
-    # Notify explorer
-    ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
-    print("Notified Windows shell of icon update.")
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+        print("Notified Windows shell of icon update.")
+    except Exception as e:
+        print(f"Error notifying shell: {e}")
 
 if __name__ == "__main__":
-    fix_shortcut()
+    fix_shortcuts()
