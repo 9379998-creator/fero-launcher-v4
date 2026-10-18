@@ -3127,7 +3127,7 @@ function createPageThumbElement(page) {
     thumb.append(missing);
   } else {
     const img = document.createElement("img");
-    img.loading = "lazy";
+    img.loading = "eager";
     img.src = page.url;
     img.alt = page.name;
     img.draggable = false;

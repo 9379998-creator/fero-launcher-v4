@@ -821,17 +821,20 @@ def render_dwg_model_progressive(
         _start_background_worker_pump(proc, target_dir, path, dpi)
 
     # Ожидание готовности листа 1
-    deadline = time.time() + wait_first_sheet_seconds
     page1_ready = False
-    while time.time() < deadline:
-        if page1_pdf.exists() and page1_pdf.stat().st_size > 4096:
-            page1_ready = True
-            break
-        if proc and proc.poll() is not None:
+    if page1_pdf.exists() and page1_pdf.stat().st_size > 4096:
+        page1_ready = True
+    elif proc:
+        deadline = time.time() + wait_first_sheet_seconds
+        while time.time() < deadline:
             if page1_pdf.exists() and page1_pdf.stat().st_size > 4096:
                 page1_ready = True
-            break
-        time.sleep(0.5)
+                break
+            if proc.poll() is not None:
+                if page1_pdf.exists() and page1_pdf.stat().st_size > 4096:
+                    page1_ready = True
+                break
+            time.sleep(0.5)
 
     if page1_ready:
         _rasterize_pdf_page(page1_pdf, page1_png, dpi)
@@ -979,35 +982,38 @@ def render_dwg_page_progressive(
         _start_background_worker_pump(proc, target_dir, file_path, dpi)
 
     # 4. Ожидание допечки листа фоновым воркером
-    deadline = time.time() + wait_seconds
-    while time.time() < deadline:
-        if pdf_path.exists() and pdf_path.stat().st_size > 4096:
-            _rasterize_pdf_page(pdf_path, png_path, dpi)
-            if png_path.exists() and png_path.stat().st_size > 0:
-                item = {
-                    "page": page,
-                    "name": f"{file_path.name} · стр. {page}",
-                    "url": f"/cache/dwg/{cache_key}/{png_name}",
-                    "bytes": png_path.stat().st_size,
-                    "previewType": "DWG_MODEL",
-                    "isEmpty": check_image_is_empty_sheet(png_path),
-                }
-                return {
-                    "name": file_path.name,
-                    "path": str(file_path),
-                    "dpi": dpi,
-                    "page": page,
-                    "cacheKey": cache_key,
-                    "cacheHit": False,
-                    "item": item,
-                    "url": item["url"],
-                    "bytes": item["bytes"],
-                    "sourcePath": str(file_path),
-                    "sourceType": "DWG",
-                    "convertedPdfPath": str(pdf_path),
-                    "convertCacheHit": False,
-                }
-        time.sleep(0.5)
+    if proc:
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            if pdf_path.exists() and pdf_path.stat().st_size > 4096:
+                _rasterize_pdf_page(pdf_path, png_path, dpi)
+                if png_path.exists() and png_path.stat().st_size > 0:
+                    item = {
+                        "page": page,
+                        "name": f"{file_path.name} · стр. {page}",
+                        "url": f"/cache/dwg/{cache_key}/{png_name}",
+                        "bytes": png_path.stat().st_size,
+                        "previewType": "DWG_MODEL",
+                        "isEmpty": check_image_is_empty_sheet(png_path),
+                    }
+                    return {
+                        "name": file_path.name,
+                        "path": str(file_path),
+                        "dpi": dpi,
+                        "page": page,
+                        "cacheKey": cache_key,
+                        "cacheHit": False,
+                        "item": item,
+                        "url": item["url"],
+                        "bytes": item["bytes"],
+                        "sourcePath": str(file_path),
+                        "sourceType": "DWG",
+                        "convertedPdfPath": str(pdf_path),
+                        "convertCacheHit": False,
+                    }
+            if proc.poll() is not None:
+                break
+            time.sleep(0.5)
 
     # Если лист еще рендерится, возвращаем превью заголовка
     fallback_url = f"/cache/dwg/{cache_key}/header_thumb.png" if thumb_path.exists() else f"/cache/dwg/{cache_key}/page-1.png"
