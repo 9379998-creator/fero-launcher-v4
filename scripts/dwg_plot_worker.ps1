@@ -130,12 +130,14 @@ try {
   Log-Msg "Opened in $openMs ms"
 
   # Оптимизация системных переменных чертежа для ускорения печати
+  try { $app.Preferences.System.DisplayAlerts = $false } catch {}
   try { $document.SetVariable("LAYOUTREGENCTL", 2) } catch {}
   try { $document.SetVariable("REGENMODE", 0) } catch {}
   try { $document.SetVariable("BACKGROUNDPLOT", 0) } catch {}
   try { $document.SetVariable("EXPERT", 5) } catch {}
   try { $document.SetVariable("FILEDIA", 0) } catch {}
   try { $document.SetVariable("CMDDIA", 0) } catch {}
+  try { $document.SetVariable("NOMUTT", 1) } catch {}
   try { $document.SetVariable("PROXYNOTICE", 0) } catch {}
   try { $document.SetVariable("DRAWORDERCTL", 0) } catch {}
 
@@ -235,7 +237,7 @@ try {
       }
     } catch {}
 
-    try { $layoutObj.PlotType = 4 } catch {} # acLayout
+    try { $layoutObj.PlotType = 5 } catch {} # acLayout (5 is acLayout in AutoCAD COM; 4 is acWindow)
     $layoutObj.PlotWithLineweights = $true
     $layoutObj.PlotWithPlotStyles = $true
   }

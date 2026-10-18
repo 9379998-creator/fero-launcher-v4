@@ -512,6 +512,18 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
 
       // Отображаем живой прогресс рендеринга для пользователя
       if (total > 0 && readyPages.length < total) {
+        if (data.workerActive === false) {
+          if (!state._dwgNoWorkerCount) state._dwgNoWorkerCount = 0;
+          state._dwgNoWorkerCount++;
+          if (state._dwgNoWorkerCount >= 4) {
+            finishProgress(`Готово ${readyPages.length} из ${total} листов`);
+            stopDwgStatusPolling();
+            return;
+          }
+        } else {
+          state._dwgNoWorkerCount = 0;
+        }
+
         els.progressLabel.textContent = "Рендеринг листов DWG";
         els.progressValue.textContent = `${readyPages.length}/${total}`;
         els.progressDetail.textContent = `Готово ${readyPages.length} из ${total} листов · AutoCAD отрисовывает следующий лист…`;

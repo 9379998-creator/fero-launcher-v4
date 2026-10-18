@@ -30,7 +30,7 @@ def background_hashing_worker():
                 SELECT d.id, d.rel_path, r.path as root_path, d.observed_revision, d.verified_content_hash
                 FROM documents d
                 JOIN roots r ON d.root_id = r.id
-                WHERE d.hash_state = 'pending' OR d.hash_state = 'error'
+                WHERE d.hash_state = 'pending'
                 LIMIT 10
             """)
             docs = cursor.fetchall()
@@ -38,6 +38,8 @@ def background_hashing_worker():
             if not docs:
                 time.sleep(2)
                 continue
+                
+            time.sleep(0.05) # Cooperative yield between batches
                 
             for doc in docs:
                 doc_id = doc["id"]

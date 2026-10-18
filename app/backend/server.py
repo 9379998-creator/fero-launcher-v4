@@ -3839,51 +3839,70 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 empty_pages = []
                 first_content_page = None
                 is_complete = False
-                total_layouts = 0
+                manifest_data = {}
+                if manifest_path.exists():
+                    try:
+                        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+                        is_complete = bool(manifest_data.get("isComplete", False))
+                        total_layouts = int(manifest_data.get("totalLayouts", 0)) or len(manifest_data.get("layouts", []))
+                    except Exception:
+                        pass
+
                 if target_dir.exists():
                     try:
-                        from app.backend.dwg_engine import _rasterize_pdf_page, check_image_is_empty_sheet
+                        from app.backend.dwg_engine import _rasterize_pdf_page, check_image_is_empty_sheet, DwgOnDemandManager
                     except ImportError:
-                        from dwg_engine import _rasterize_pdf_page, check_image_is_empty_sheet
+                        from dwg_engine import _rasterize_pdf_page, check_image_is_empty_sheet, DwgOnDemandManager
 
-                    # На лету проверяем готовые PDF от AutoCAD и нарезаем недостающие PNG
-                    for pdf_file in target_dir.glob("page_*.pdf"):
-                        m_pdf = re.match(r"^page_(\d+)\.pdf$", pdf_file.name)
-                        if m_pdf and pdf_file.stat().st_size > 4096:
-                            tab = int(m_pdf.group(1))
-                            png_p = target_dir / f"page-{tab}.png"
-                            need_raster = (not png_p.exists()) or (png_p.stat().st_size < 35000) or (png_p.stat().st_mtime < pdf_file.stat().st_mtime)
-                            if need_raster:
-                                try:
-                                    _rasterize_pdf_page(pdf_file, png_p, DWG_PREVIEW_DPI)
-                                except Exception as rx:
-                                    self.log_message(f"Rasterize error for {pdf_file.name}: {rx}")
+                    if is_complete:
+                        completed_dict = manifest_data.get("completedPages", {})
+                        if completed_dict:
+                            ready_pages = sorted([int(k) for k in completed_dict.keys()])
+                        else:
+                            ready_pages = list(range(1, total_layouts + 1)) if total_layouts > 0 else [1]
+                        empty_pages = manifest_data.get("emptyPages", [])
+                    else:
+                        # На лету проверяем готовые PDF от AutoCAD и нарезаем недостающие PNG
+                        for pdf_file in target_dir.glob("page_*.pdf"):
+                            m_pdf = re.match(r"^page_(\d+)\.pdf$", pdf_file.name)
+                            if m_pdf and pdf_file.stat().st_size > 4096:
+                                tab = int(m_pdf.group(1))
+                                png_p = target_dir / f"page-{tab}.png"
+                                need_raster = (not png_p.exists()) or (png_p.stat().st_size < 35000) or (png_p.stat().st_mtime < pdf_file.stat().st_mtime)
+                                if need_raster:
+                                    try:
+                                        _rasterize_pdf_page(pdf_file, png_p, DWG_PREVIEW_DPI)
+                                    except Exception as rx:
+                                        self.log_message(f"Rasterize error for {pdf_file.name}: {rx}")
 
-                    for png_file in target_dir.glob("page-*.png"):
-                        m = re.match(r"^page-(\d+)\.png$", png_file.name)
-                        if m and png_file.stat().st_size > 0:
-                            p_num = int(m.group(1))
-                            ready_pages.append(p_num)
-                            if check_image_is_empty_sheet(png_file):
-                                empty_pages.append(p_num)
-                    ready_pages.sort()
-                    empty_pages.sort()
+                        for png_file in target_dir.glob("page-*.png"):
+                            m = re.match(r"^page-(\d+)\.png$", png_file.name)
+                            if m and png_file.stat().st_size > 0:
+                                p_num = int(m.group(1))
+                                ready_pages.append(p_num)
+                                if check_image_is_empty_sheet(png_file):
+                                    empty_pages.append(p_num)
+                        ready_pages.sort()
+                        empty_pages.sort()
 
                     for p_num in ready_pages:
                         if p_num not in empty_pages:
                             first_content_page = p_num
                             break
 
-                if manifest_path.exists():
-                    try:
-                        m = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-                        is_complete = bool(m.get("isComplete", False))
-                        total_layouts = int(m.get("totalLayouts", 0)) or len(m.get("layouts", []))
-                    except Exception:
-                        pass
-
                 if total_layouts > 0 and len(ready_pages) >= total_layouts:
                     is_complete = True
+
+                # Проверяем, активен ли рабочий процесс фонового плоттера
+                worker_active = False
+                try:
+                    from app.backend.dwg_engine import DwgOnDemandManager
+                    with DwgOnDemandManager._lock:
+                        proc = DwgOnDemandManager._active_workers.get(str(file_path.resolve()).casefold())
+                        if proc is not None and proc.poll() is None:
+                            worker_active = True
+                except Exception:
+                    pass
 
                 self.send_json(
                     HTTPStatus.OK,
@@ -3896,6 +3915,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                         "isComplete": is_complete,
                         "totalLayouts": total_layouts,
                         "readyCount": len(ready_pages),
+                        "workerActive": worker_active,
                     },
                 )
             except Exception as error:
