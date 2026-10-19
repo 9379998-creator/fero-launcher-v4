@@ -551,6 +551,11 @@ def read_pdf_cache_manifest(path: Path, dpi: int, key: str, target_dir: Path) ->
                 with _MANIFEST_LOCK:
                     _MANIFEST_CACHE[key] = manifest
                 return manifest
+        else:
+            try:
+                manifest_path.unlink()
+            except OSError:
+                pass
 
     if not manifest:
         legacy_items = []
@@ -605,15 +610,21 @@ def write_pdf_cache_manifest(
     }
     with _MANIFEST_LOCK:
         _MANIFEST_CACHE[key] = manifest
+        tmp = None
         try:
-            tmp = target_dir / "manifest.json.tmp"
+            import uuid
+            tmp = target_dir / f"manifest_{uuid.uuid4().hex}.tmp"
             tmp.write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             os.replace(tmp, target_dir / "manifest.json")
         except Exception:
-            pass
+            if tmp and tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
 
 def poppler_tool(name: str) -> str | None:
@@ -1159,7 +1170,7 @@ _DWG_BG_LOCK = threading.Lock()
 _DWG_BG_ACTIVE: set[str] = set()
 
 
-def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
+def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI, force: bool = False) -> dict:
     if not path.exists():
         return {
             "name": path.name,
@@ -1182,7 +1193,6 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
             "convertCacheHit": False,
             "previewMode": "cad-smart-layouts",
         }
-def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI, force: bool = False) -> dict:
     if not path.is_file() or path.suffix.casefold() != ".dwg":
         raise ValueError(f"Это не DWG-файл: {path}")
 
@@ -2821,6 +2831,7 @@ def render_pdf(
     dpi: int = DEFAULT_PDF_DPI,
     page_timeout_seconds: int = PDF_PAGE_TIMEOUT_SECONDS,
     first_page_only: bool = False,
+    force: bool = False,
 ) -> dict:
     if not path.exists():
         return {
@@ -2845,41 +2856,63 @@ def render_pdf(
     target_dir = PDF_CACHE_DIR / key
     target_dir.mkdir(parents=True, exist_ok=True)
 
+    if force:
+        with _MANIFEST_LOCK:
+            _MANIFEST_CACHE.pop(key, None)
+        manifest_file = target_dir / "manifest.json"
+        if manifest_file.exists():
+            try:
+                manifest_file.unlink()
+            except OSError:
+                pass
+
     png1 = target_dir / "page-1.png"
-    cached_manifest = read_pdf_cache_manifest(path, dpi, key, target_dir)
-    if cached_manifest:
-        cached_items = cached_manifest["items"]
-        cached_errors = cached_manifest.get("errors", [])
-        cached_total = cached_manifest.get("pages", len(cached_items)) or 0
-        if first_page_only and png1.exists() and png1.stat().st_size > 0:
-            item1 = cached_items[0] if cached_items else pdf_page_item(path, key, 1, png1)
-            return {
-                "name": path.name,
-                "path": str(path),
-                "dpi": dpi,
-                "pages": cached_total or 1,
-                "renderedPages": 1,
-                "cacheKey": key,
-                "cacheHit": True,
-                "cacheHitPages": 1,
-                "newRenderedPages": 0,
-                "errors": cached_errors,
-                "items": [item1],
-            }
-        if not first_page_only and cached_total and len(cached_items) >= cached_total:
-            return {
-                "name": path.name,
-                "path": str(path),
-                "dpi": dpi,
-                "pages": cached_total,
-                "renderedPages": len(cached_items),
-                "cacheKey": key,
-                "cacheHit": True,
-                "cacheHitPages": len(cached_items),
-                "newRenderedPages": 0,
-                "errors": cached_errors,
-                "items": cached_items,
-            }
+    if not force:
+        cached_manifest = read_pdf_cache_manifest(path, dpi, key, target_dir)
+        if cached_manifest:
+            cached_items = cached_manifest.get("items", [])
+            cached_errors = cached_manifest.get("errors", [])
+            cached_total = cached_manifest.get("pages", len(cached_items)) or 0
+            if first_page_only and png1.exists() and png1.stat().st_size > 0:
+                item1 = cached_items[0] if cached_items else pdf_page_item(path, key, 1, png1)
+                return {
+                    "name": path.name,
+                    "path": str(path),
+                    "sourcePath": str(path),
+                    "dpi": dpi,
+                    "pages": cached_total or 1,
+                    "renderedPages": 1,
+                    "cacheKey": key,
+                    "cacheHit": True,
+                    "cacheHitPages": 1,
+                    "newRenderedPages": 0,
+                    "errors": cached_errors,
+                    "items": [item1],
+                }
+            if not first_page_only and cached_total and len(cached_items) >= cached_total:
+                all_files_exist = True
+                for it in cached_items:
+                    p_num = it.get("page", 1)
+                    p_png = target_dir / f"page-{p_num}.png"
+                    if not p_png.exists() or p_png.stat().st_size == 0:
+                        all_files_exist = False
+                        break
+                    it["bytes"] = p_png.stat().st_size
+                if all_files_exist:
+                    return {
+                        "name": path.name,
+                        "path": str(path),
+                        "sourcePath": str(path),
+                        "dpi": dpi,
+                        "pages": cached_total,
+                        "renderedPages": len(cached_items),
+                        "cacheKey": key,
+                        "cacheHit": True,
+                        "cacheHitPages": len(cached_items),
+                        "newRenderedPages": 0,
+                        "errors": cached_errors,
+                        "items": cached_items,
+                    }
 
     # 1. Быстрый рендеринг через PyMuPDF (fitz) без создания сотен процессов
     with _FITZ_RENDER_LOCK:
@@ -2891,14 +2924,11 @@ def render_pdf(
             rendered_count = 0
             cache_hit_count = 0
 
-            # Для каталогов и больших PDF (> 50 страниц) не рендерим сотни страниц в память/диск за один запрос:
-            # первично отдаём окно первых 3 страниц, остальные подгружаются лениво по номерам страниц (/api/pdf/page)
-            MAX_INITIAL_PAGES = 3 # Only render a small buffer synchronously
-            pages_to_render = 1 if first_page_only else min(page_count, MAX_INITIAL_PAGES)
+            pages_to_render = 1 if first_page_only else page_count
             for page_idx in range(pages_to_render):
                 page_num = page_idx + 1
                 png = target_dir / f"page-{page_num}.png"
-                if png.exists() and png.stat().st_size > 0:
+                if not force and png.exists() and png.stat().st_size > 0:
                     cache_hit_count += 1
                 else:
                     try:
@@ -2912,22 +2942,24 @@ def render_pdf(
 
             for page_num in range(1, page_count + 1):
                 png = target_dir / f"page-{page_num}.png"
+                b = png.stat().st_size if png.exists() else 0
                 pages.append({
                     "page": page_num,
                     "name": f"{path.name} — стр. {page_num}",
                     "url": f"/cache/pdf/{key}/{png.name}",
-                    "bytes": png.stat().st_size if png.exists() else 0,
+                    "bytes": b,
                 })
 
             if pages:
                 write_pdf_cache_manifest(path, dpi, key, target_dir, page_count, pages, errors)
+                rendered_valid = len([p for p in pages if p["bytes"] > 0])
                 return {
                     "name": path.name,
                     "path": str(path),
                     "sourcePath": str(path),
                     "dpi": dpi,
                     "pages": page_count,
-                    "renderedPages": len(pages),
+                    "renderedPages": rendered_valid,
                     "cacheKey": key,
                     "cacheHit": cache_hit_count == pages_to_render,
                     "cacheHitPages": cache_hit_count,
@@ -2951,7 +2983,7 @@ def render_pdf(
     rendered_count = 0
     cache_hit_count = 0
 
-    pages_to_render = 1 if first_page_only else min(page_count, 3)
+    pages_to_render = 1 if first_page_only else page_count
     for page in range(1, pages_to_render + 1):
         if time.monotonic() - started_at > PDF_DOCUMENT_TIMEOUT_SECONDS:
             for skipped_page in range(page, pages_to_render + 1):
@@ -2959,7 +2991,7 @@ def render_pdf(
             break
 
         png = target_dir / f"page-{page}.png"
-        if png.exists() and png.stat().st_size > 0:
+        if not force and png.exists() and png.stat().st_size > 0:
             cache_hit_count += 1
         else:
             for stale in target_dir.glob(f"page-{page}*.png"):
@@ -2980,7 +3012,7 @@ def render_pdf(
                         str(path),
                         str(prefix),
                     ],
-                        timeout=page_timeout_seconds,
+                    timeout=page_timeout_seconds,
                 )
                 candidate = target_dir / f"page-{page}.png"
                 if result.returncode != 0:
@@ -2997,11 +3029,12 @@ def render_pdf(
 
     for page_num in range(1, page_count + 1):
         png = target_dir / f"page-{page_num}.png"
+        b = png.stat().st_size if png.exists() else 0
         pages.append({
             "page": page_num,
             "name": f"{path.name} — стр. {page_num}",
             "url": f"/cache/pdf/{key}/{png.name}",
-            "bytes": png.stat().st_size if png.exists() else 0,
+            "bytes": b,
         })
 
     if not pages:
@@ -3013,13 +3046,14 @@ def render_pdf(
         raise RuntimeError(f"Не удалось отрендерить ни одной страницы PDF. {tool_version}. Ошибки: {errors}")
 
     write_pdf_cache_manifest(path, dpi, key, target_dir, page_count, pages, errors)
+    rendered_valid = len([p for p in pages if p["bytes"] > 0])
     return {
         "name": path.name,
         "path": str(path),
         "sourcePath": str(path),
         "dpi": dpi,
         "pages": page_count,
-        "renderedPages": len(pages),
+        "renderedPages": rendered_valid,
         "cacheKey": key,
         "cacheHit": cache_hit_count == page_count,
         "cacheHitPages": cache_hit_count,
@@ -3715,7 +3749,8 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if len(raw_files) > 15:
                     raise ValueError("За один раз пока можно отрендерить не больше 15 PDF")
                 first_page_only = bool(body.get("firstPageOnly", False))
-                documents = [render_pdf(Path(str(file_path)), dpi=dpi, first_page_only=first_page_only) for file_path in raw_files]
+                force = bool(body.get("force", False))
+                documents = [render_pdf(Path(str(file_path)), dpi=dpi, first_page_only=first_page_only, force=force) for file_path in raw_files]
                 document_errors = [
                     {"document": document["name"], "path": document["path"], **error}
                     for document in documents
@@ -4282,12 +4317,27 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     import re
                     match = re.match(r"^page-(\d+)\.png$", parts[2])
                     if match:
+                        page_req = int(match.group(1))
                         manifest = read_pdf_cache_manifest(Path(), 0, parts[1], target.parent)
+                        original_path = None
+                        dpi = DEFAULT_PDF_DPI
                         if manifest and manifest.get("path"):
+                            original_path = Path(manifest["path"])
+                            dpi = manifest.get("dpi", DEFAULT_PDF_DPI)
+                        elif (target.parent / "manifest.json").exists():
                             try:
-                                original_path = Path(manifest["path"])
-                                dpi = manifest.get("dpi", DEFAULT_PDF_DPI)
-                                render_pdf_page(original_path, int(match.group(1)), dpi)
+                                raw_text = (target.parent / "manifest.json").read_text(encoding="utf-8", errors="replace")
+                                m_path = re.search(r'"path"\s*:\s*"([^"]+)"', raw_text)
+                                if m_path:
+                                    original_path = Path(m_path.group(1).replace(r'\\', '\\'))
+                                m_dpi = re.search(r'"dpi"\s*:\s*(\d+)', raw_text)
+                                if m_dpi:
+                                    dpi = int(m_dpi.group(1))
+                            except Exception:
+                                pass
+                        if original_path and original_path.exists():
+                            try:
+                                render_pdf_page(original_path, page_req, dpi)
                             except Exception as e:
                                 self.log_message(f"Lazy render failed: {e}")
             if not target.exists() or not target.is_file():
@@ -4306,6 +4356,25 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
                     self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
                     self.send_header("X-DWG-Pending", "1")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if relative.startswith("pdf/"):
+                    parts = relative.split("/")
+                    page_label = parts[2].replace("page-", "").replace(".png", "") if len(parts) == 3 else "…"
+                    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200" viewBox="0 0 300 200">
+  <rect width="100%" height="100%" fill="#1a1c23"/>
+  <rect x="6" y="6" width="288" height="188" rx="4" fill="none" stroke="#333745" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="50%" y="42%" dominant-baseline="middle" text-anchor="middle" font-size="26">⏳</text>
+  <text x="50%" y="65%" dominant-baseline="middle" text-anchor="middle" fill="#d2d5e2" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="13" font-weight="600">Стр. {page_label}</text>
+  <text x="50%" y="82%" dominant-baseline="middle" text-anchor="middle" fill="#75798e" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="11">рендерится в фоне…</text>
+</svg>'''
+                    body = svg.encode("utf-8")
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                    self.send_header("X-PDF-Pending", "1")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)

@@ -3134,6 +3134,15 @@ function createPageThumbElement(page) {
     if (page.url && page.url.includes("/dwg/")) {
       img.dataset.dwgLoaded = (page.bytes > 0) ? "1" : "0";
     }
+    img.onerror = () => {
+      const retries = Number(img.dataset.retries || "0");
+      if (retries < 2) {
+        img.dataset.retries = String(retries + 1);
+        setTimeout(() => {
+          img.src = `${page.url}?retry=${Date.now()}`;
+        }, 1200);
+      }
+    };
     thumb.append(img);
   }
   const label = document.createElement("span");
