@@ -119,6 +119,22 @@ def _generate_placeholder_png(dwg_name: str, layout_name: str = "Model") -> byte
         )
 
 
+def _validate_image_bytes(data: bytes) -> bool:
+    """Проверяет валидность байтов изображения и его минимальные размеры."""
+    if not data or len(data) < 2000:
+        return False
+    try:
+        from PIL import Image
+        import io
+
+        with Image.open(io.BytesIO(data)) as im:
+            im.verify()
+            w, h = im.size
+            return 20 <= w <= 8192 and 20 <= h <= 8192
+    except Exception:
+        return False
+
+
 def extract_raw_thumbnail_from_dwg(file_path: Union[str, Path]) -> Optional[Tuple[bytes, str]]:
     """Прямое чтение встроенного превью из заголовка DWG (R13-R2018) за < 1 мс.
 
@@ -145,13 +161,15 @@ def extract_raw_thumbnail_from_dwg(file_path: Union[str, Path]) -> Optional[Tupl
                         if img_type == 6 and size > 0:
                             f.seek(start)
                             data = f.read(size)
-                            if data.startswith(b"\x89PNG"):
+                            if data.startswith(b"\x89PNG") and _validate_image_bytes(data):
                                 return data, "PNG"
                         elif img_type == 2 and size > 0:
                             f.seek(start)
                             data = f.read(size)
                             bmp_bytes = _dib_to_bmp(data)
-                            return _bmp_to_png(bmp_bytes), "PNG"
+                            png_bytes = _bmp_to_png(bmp_bytes)
+                            if _validate_image_bytes(png_bytes):
+                                return png_bytes, "PNG"
 
             # Метод 2: Быстрое сканирование первых 2 МБ на случай смещения таблицы
             f.seek(0)
@@ -165,20 +183,24 @@ def extract_raw_thumbnail_from_dwg(file_path: Union[str, Path]) -> Optional[Tupl
                     if img_type == 6 and size > 0:
                         f.seek(start)
                         data = f.read(size)
-                        if data.startswith(b"\x89PNG"):
+                        if data.startswith(b"\x89PNG") and _validate_image_bytes(data):
                             return data, "PNG"
                     elif img_type == 2 and size > 0:
                         f.seek(start)
                         data = f.read(size)
                         bmp_bytes = _dib_to_bmp(data)
-                        return _bmp_to_png(bmp_bytes), "PNG"
+                        png_bytes = _bmp_to_png(bmp_bytes)
+                        if _validate_image_bytes(png_bytes):
+                            return png_bytes, "PNG"
 
             # Метод 3: Поиск сигнатуры PNG в первых 2 МБ
             png_idx = chunk.find(b"\x89PNG\r\n\x1a\n")
             if png_idx != -1:
                 iend_idx = chunk.find(b"IEND\xaeB`\x82", png_idx)
                 if iend_idx != -1:
-                    return chunk[png_idx : iend_idx + 8], "PNG"
+                    candidate = chunk[png_idx : iend_idx + 8]
+                    if _validate_image_bytes(candidate):
+                        return candidate, "PNG"
     except Exception as e:
         logger.debug("Error extracting DWG thumbnail from %s: %s", path, e)
 
@@ -708,6 +730,52 @@ def _start_background_worker_pump(proc: subprocess.Popen, output_dir: Path, inpu
     t2.start()
 
 
+def export_dwg_layout_accore(
+    input_dwg: Path,
+    output_pdf: Path,
+    work_dir: Path,
+    layout_name: str = "",
+    timeout_sec: int = 120,
+) -> bool:
+    """Headless AutoCAD PDF export using accoreconsole.exe via Invoke-NativeDwgPdfExport.ps1."""
+    script_path = REPO_ROOT / "scripts" / "Invoke-NativeDwgPdfExport.ps1"
+    if not script_path.exists():
+        logger.warning("Invoke-NativeDwgPdfExport.ps1 not found at %s", script_path)
+        return False
+    work_dir.mkdir(parents=True, exist_ok=True)
+    ps_cmd = (
+        f'. "{script_path}"; '
+        f'Invoke-NativeDwgPdfExport -InputPath "{input_dwg}" -OutputPdf "{output_pdf}" -WorkDir "{work_dir}" -TimeoutSec {timeout_sec}'
+    )
+    if layout_name:
+        ps_cmd += f' -LayoutName "{layout_name}"'
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        ps_cmd,
+    ]
+    creation_flags = 0
+    if os.name == "nt":
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec + 15,
+            creationflags=creation_flags,
+        )
+        if output_pdf.exists() and output_pdf.stat().st_size > 4096:
+            return True
+        logger.warning("accoreconsole export incomplete for %s: stdout=%s stderr=%s", input_dwg.name, res.stdout[-300:] if res.stdout else "", res.stderr[-300:] if res.stderr else "")
+    except Exception as e:
+        logger.warning("Error running accoreconsole export for %s: %s", input_dwg.name, e)
+    return False
+
+
 def render_dwg_model_progressive(
     path: Path,
     target_dir: Path,
@@ -838,8 +906,14 @@ def render_dwg_model_progressive(
 
     if page1_ready:
         _rasterize_pdf_page(page1_pdf, page1_png, dpi)
-    elif not page1_png.exists() and thumb_png.exists():
-        page1_png.write_bytes(thumb_png.read_bytes())
+    else:
+        # Fallback: Use headless accoreconsole if AutoCAD GUI worker is not available or timed out
+        work_dir = target_dir / "workdir"
+        if export_dwg_layout_accore(path, page1_pdf, work_dir, timeout_sec=90):
+            _rasterize_pdf_page(page1_pdf, page1_png, dpi)
+            page1_ready = True
+        elif not page1_png.exists() and thumb_png.exists():
+            page1_png.write_bytes(thumb_png.read_bytes())
 
     # Сбор метаданных листов из manifest.json или кеша событий воркера
     layouts = []
@@ -852,6 +926,26 @@ def render_dwg_model_progressive(
 
     if not layouts:
         layouts = DwgOnDemandManager.get_layouts(path)
+
+    if page1_ready and not layouts:
+        layouts = [{"name": "Лист 1", "tabOrder": 1, "plotRotation": 0}]
+        try:
+            item_stat = path.stat()
+            manifest_data = {
+                "sourcePath": str(path),
+                "sourceName": path.name,
+                "sourceSize": item_stat.st_size,
+                "sourceMtime": int(item_stat.st_mtime),
+                "outputDir": str(target_dir),
+                "isComplete": True,
+                "totalLayouts": 1,
+                "validLayouts": 1,
+                "layouts": layouts,
+                "completedPages": {1: {"bytes": page1_png.stat().st_size if page1_png.exists() else 0, "name": "Лист 1"}},
+            }
+            manifest_path.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     items = []
     if layouts:
@@ -980,9 +1074,6 @@ def render_dwg_page_progressive(
     proc = DwgOnDemandManager.get_or_start_worker(file_path, target_dir, priority_tab=page)
     if proc:
         _start_background_worker_pump(proc, target_dir, file_path, dpi)
-
-    # 4. Ожидание допечки листа фоновым воркером
-    if proc:
         deadline = time.time() + wait_seconds
         while time.time() < deadline:
             if pdf_path.exists() and pdf_path.stat().st_size > 4096:
@@ -1014,6 +1105,47 @@ def render_dwg_page_progressive(
             if proc.poll() is not None:
                 break
             time.sleep(0.5)
+
+    # 4. Fallback: Если AutoCAD GUI воркер не запущен или не отдал PDF — вызываем headless accoreconsole
+    if not pdf_path.exists() or pdf_path.stat().st_size <= 4096:
+        layout_name = ""
+        manifest_p = target_dir / "manifest.json"
+        if manifest_p.exists():
+            try:
+                m = json.loads(manifest_p.read_text(encoding="utf-8-sig"))
+                for lay in m.get("layouts", []):
+                    if int(lay.get("tabOrder", 1)) == page:
+                        layout_name = lay.get("name", "")
+                        break
+            except Exception:
+                pass
+        work_dir = target_dir / "workdir"
+        if export_dwg_layout_accore(file_path, pdf_path, work_dir, layout_name=layout_name, timeout_sec=90):
+            _rasterize_pdf_page(pdf_path, png_path, dpi)
+            if png_path.exists() and png_path.stat().st_size > 0:
+                item = {
+                    "page": page,
+                    "name": f"{file_path.name} · {layout_name or f'стр. {page}'}",
+                    "url": f"/cache/dwg/{cache_key}/{png_name}",
+                    "bytes": png_path.stat().st_size,
+                    "previewType": "DWG_MODEL",
+                    "isEmpty": check_image_is_empty_sheet(png_path),
+                }
+                return {
+                    "name": file_path.name,
+                    "path": str(file_path),
+                    "dpi": dpi,
+                    "page": page,
+                    "cacheKey": cache_key,
+                    "cacheHit": False,
+                    "item": item,
+                    "url": item["url"],
+                    "bytes": item["bytes"],
+                    "sourcePath": str(file_path),
+                    "sourceType": "DWG",
+                    "convertedPdfPath": str(pdf_path),
+                    "convertCacheHit": False,
+                }
 
     # Если лист еще рендерится, возвращаем превью заголовка
     fallback_url = f"/cache/dwg/{cache_key}/header_thumb.png" if thumb_path.exists() else f"/cache/dwg/{cache_key}/page-1.png"

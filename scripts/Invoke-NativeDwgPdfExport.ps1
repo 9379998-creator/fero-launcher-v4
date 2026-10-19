@@ -83,15 +83,24 @@ function Invoke-NativeDwgPdfExport {
     '(setvar "EXPERT" 5)',
     '(setvar "BACKGROUNDPLOT" 0)',
     '(setvar "FILEDIA" 0)',
-    '(setvar "CMDDIA" 0)',
-    '(if (= (getvar "CTAB") "Model")',
-    ('  (command "_.-EXPORT" "_PDF" "_E" "_N" "{0}")' -f $normalizedOut),
-    ('  (command "_.-EXPORT" "_PDF" "_C" "_N" "{0}")' -f $normalizedOut),
-    ')',
-    '_.QUIT',
-    '_N'
+    '(setvar "CMDDIA" 0)'
   )
-  [System.IO.File]::WriteAllLines($scrFile, $scriptLines, [System.Text.Encoding]::ASCII)
+
+  if ($LayoutName -and $LayoutName -ne "Model" -and $LayoutName -ne "Layout1") {
+    $scriptLines += ('(setvar "CTAB" "{0}")' -f $LayoutName)
+    $scriptLines += ('(command "_.-EXPORT" "_PDF" "_C" "_N" "{0}")' -f $normalizedOut)
+  } else {
+    $scriptLines += '(if (= (getvar "CTAB") "Model")'
+    $scriptLines += ('  (command "_.-EXPORT" "_PDF" "_E" "_N" "{0}")' -f $normalizedOut)
+    $scriptLines += ('  (command "_.-EXPORT" "_PDF" "_C" "_N" "{0}")' -f $normalizedOut)
+    $scriptLines += ')'
+  }
+
+  $scriptLines += '_.QUIT'
+  $scriptLines += '_N'
+
+  $cp1251 = [System.Text.Encoding]::GetEncoding(1251)
+  [System.IO.File]::WriteAllLines($scrFile, $scriptLines, $cp1251)
 
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   $runStart = Get-Date
