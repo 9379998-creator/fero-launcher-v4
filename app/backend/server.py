@@ -3529,6 +3529,11 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 first_content_page = None
                 is_complete = False
                 manifest_data = {}
+                # manifest.json появляется только ПОСЛЕ завершения экспорта. На фазе 0
+                # в кэше лежит лишь header_thumb.png, манифеста нет — и обращение к
+                # total_layouts ниже падало с UnboundLocalError (HTTP 400), из-за чего
+                # фронтенд гасил опрос статуса и HD-рендер никогда не подхватывался.
+                total_layouts = 0
                 if manifest_path.exists():
                     try:
                         manifest_data = json.loads(manifest_path.read_text(encoding="utf-8-sig"))

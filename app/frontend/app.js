@@ -494,6 +494,10 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
   stopDwgStatusPolling();
   if (!filePath) return;
   state.activeDwgPath = filePath;
+  // Счётчики живут в state и переживали переключение файлов: остаток от прошлого
+  // чертежа сразу приближал обрыв опроса на новом. Сбрасываем на каждый старт.
+  state._dwgNoWorkerCount = 0;
+  state._dwgStatusErrors = 0;
   const pollController = new AbortController();
   state.dwgStatusAbortController = pollController;
 
@@ -515,11 +519,18 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
       }
       if (!resp.ok) {
         if (resp.status >= 400) {
-          stopDwgStatusPolling();
-          showOperationError(new Error(`Ошибка сервера при проверке статуса DWG (HTTP ${resp.status})`));
+          // Одиночный сбой статуса не должен убивать опрос: пока идёт рендер,
+          // сервер может быть занят и вернуть 4xx/5xx. Даём запас попыток,
+          // иначе готовый HD-лист никогда не подхватится.
+          state._dwgStatusErrors = (state._dwgStatusErrors || 0) + 1;
+          if (state._dwgStatusErrors >= 20) {
+            stopDwgStatusPolling();
+            showOperationError(new Error(`Ошибка сервера при проверке статуса DWG (HTTP ${resp.status})`));
+          }
         }
         return;
       }
+      state._dwgStatusErrors = 0;
       const data = await resp.json();
       if (state.renderEpoch !== epoch || state.progressCancelled || state.activeDwgPath !== filePath) {
         stopDwgStatusPolling();
@@ -540,7 +551,10 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
         if (data.workerActive === false) {
           if (!state._dwgNoWorkerCount) state._dwgNoWorkerCount = 0;
           state._dwgNoWorkerCount++;
-          if (state._dwgNoWorkerCount >= 4) {
+          // 4 секунды — слишком мало: accoreconsole поднимается и копирует DWG
+          // дольше, а в это время workerActive ещё false. Даём ~12 с запаса,
+          // прежде чем считать, что рендер действительно встал.
+          if (state._dwgNoWorkerCount >= 12) {
             finishProgress(`Готово ${readyPages.length} из ${total} листов`);
             stopDwgStatusPolling();
             return;
@@ -570,7 +584,7 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
         const src = img.getAttribute("src") || "";
         if (!src.includes(data.cacheKey) && !src.includes("dwg/")) return;
         if (readySet.has(pageNum)) {
-          if (img.dataset.dwgLoaded !== "1" || src.includes(".svg") || img.naturalWidth <= 300) {
+          if (img.dataset.dwgLoaded !== "1" || src.includes(".svg") || src.includes("header_thumb.png") || img.naturalWidth <= 300) {
             img.dataset.dwgLoaded = "1";
             img.src = `/cache/dwg/${data.cacheKey}/page-${pageNum}.png?v=${Date.now()}`;
           }
@@ -583,17 +597,22 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
         const stageSrc = els.pdfPageImage.getAttribute("src") || "";
         if (stageSrc.includes(data.cacheKey) || stageSrc.includes("dwg/")) {
           const activeMatch = stageSrc.match(/page-(\d+)\.png/);
-          if (activeMatch) {
-            const activePageNum = parseInt(activeMatch[1], 10);
-            if (readySet.has(activePageNum)) {
-              const marker = `${data.cacheKey}|${activePageNum}`;
-              if (els.pdfPageImage.dataset.dwgLoadedPage !== marker || els.pdfPageImage.naturalWidth <= 300) {
-                els.pdfPageImage.dataset.dwgLoadedPage = marker;
-                els.pdfPageImage.src = `/cache/dwg/${data.cacheKey}/page-${activePageNum}.png?v=${Date.now()}`;
-                els.pdfPageImage.onload = () => {
-                  applyPageView();
-                };
-              }
+          let activePageNum = activeMatch ? parseInt(activeMatch[1], 10) : null;
+          if (!activePageNum && (stageSrc.includes("header_thumb.png") || stageSrc.includes("placeholder"))) {
+            const activeP = state.renderedPages?.find((p) => pageKey(p) === state.activePageKey);
+            activePageNum = Number(activeP?.page) || 1;
+          }
+          if (activePageNum && readySet.has(activePageNum)) {
+            const marker = `${data.cacheKey}|${activePageNum}`;
+            const isDraft = stageSrc.includes("header_thumb.png") || stageSrc.includes("placeholder");
+            if (els.pdfPageImage.dataset.dwgLoadedPage !== marker || els.pdfPageImage.naturalWidth <= 300 || isDraft) {
+              els.pdfPageImage.dataset.dwgLoadedPage = marker;
+              const newUrl = `/cache/dwg/${data.cacheKey}/page-${activePageNum}.png?v=${Date.now()}`;
+              state.activePageUrl = newUrl;
+              els.pdfPageImage.src = newUrl;
+              els.pdfPageImage.onload = () => {
+                applyPageView();
+              };
             }
           }
         }
@@ -606,6 +625,7 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
           if (docPath === filePath && readySet.has(Number(p.page))) {
             p.bytes = Math.max(p.bytes || 0, 1024);
             p.isEmpty = emptySet.has(Number(p.page));
+            p.url = `/cache/dwg/${data.cacheKey}/page-${p.page}.png`;
           }
         });
       }
@@ -3158,7 +3178,8 @@ function createPageThumbElement(page) {
     img.alt = page.name;
     img.draggable = false;
     if (page.url && page.url.includes("/dwg/")) {
-      img.dataset.dwgLoaded = (page.bytes > 0) ? "1" : "0";
+      const isReady = (page.bytes > 35000) && !page.url.includes("header_thumb.png") && !page.url.includes("placeholder");
+      img.dataset.dwgLoaded = isReady ? "1" : "0";
     }
     img.onerror = () => {
       const retries = Number(img.dataset.retries || "0");
@@ -3883,7 +3904,7 @@ function showPdfPage(page, options = {}) {
   els.pdfPageImage.hidden = false;
   if (displayPage.url && displayPage.url.includes("/dwg/")) {
     const pNum = Number(displayPage.page) || 1;
-    const isReady = (displayPage.bytes > 0);
+    const isReady = (displayPage.bytes > 35000) && !displayPage.url.includes("header_thumb.png") && !displayPage.url.includes("placeholder");
     els.pdfPageImage.dataset.dwgLoadedPage = isReady ? `${targetDocPath}|${pNum}` : "";
     if (!isReady && !state.dwgPollTimer && targetDocPath) {
       startDwgStatusPolling(targetDocPath, page.totalPages || 0, state.renderEpoch);

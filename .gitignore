@@ -57,3 +57,9 @@ runtime/tools/
 .DS_Store
 Thumbs.db
 
+
+# Review bundles and exports
+REVIEW_BUNDLE_*.txt
+export_for_review/
+*.pyc
+runtime/
