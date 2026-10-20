@@ -17,8 +17,11 @@ import io
 import json
 import logging
 import os
+import re
+import shutil
 import struct
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -26,6 +29,17 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger("dwg_engine")
+
+# Глобальный семафор для предотвращения параллельного запуска accoreconsole.exe
+_ACCORE_SEMAPHORE = threading.Semaphore(1)
+_ACCORE_JOBS_LOCK = threading.Lock()
+_ACTIVE_ACCORE_JOBS: set[str] = set()
+
+
+def is_accore_job_active(path: Union[str, Path]) -> bool:
+    key_prefix = str(Path(path).resolve()).casefold()
+    with _ACCORE_JOBS_LOCK:
+        return any(k == key_prefix or k.startswith(f"{key_prefix}::") for k in _ACTIVE_ACCORE_JOBS)
 
 # 16-байтный сигнатурный маркер Autodesk для таблицы растровых изображений в заголовке DWG
 DWG_THUMBNAIL_SENTINEL = b"\x1F\x25\x6D\x07\xD4\x36\x28\x28\x9D\x57\xCA\x3F\x9D\x44\x10\x2B"
@@ -493,21 +507,30 @@ def get_dwg_layout_preview(
     }
 
 
-def _rasterize_pdf_page(pdf_path: Path, out_png: Path, dpi: int = 150) -> bool:
-    """Конвертирует первую страницу PDF в PNG через PyMuPDF (fitz)."""
-    try:
-        import fitz
+_FITZ_LOCK = threading.Lock()
 
-        with fitz.open(str(pdf_path)) as doc:
-            if len(doc) > 0:
-                page = doc[0]
-                pix = page.get_pixmap(dpi=dpi)
-                out_png.parent.mkdir(parents=True, exist_ok=True)
-                pix.save(str(out_png))
-                return True
-    except Exception as e:
-        logger.warning("Ошибка растеризации %s в %s: %s", pdf_path, out_png, e)
-    return False
+
+def _rasterize_pdf_page(pdf_path: Path, out_png: Path, dpi: int = 150) -> bool:
+    """Конвертирует первую страницу PDF в PNG через PyMuPDF (fitz) с атомарной записью под _FITZ_LOCK."""
+    if not pdf_path.exists() or pdf_path.stat().st_size <= 1024:
+        return False
+    with _FITZ_LOCK:
+        try:
+            import fitz
+
+            with fitz.open(str(pdf_path)) as doc:
+                if len(doc) > 0:
+                    page = doc[0]
+                    pix = page.get_pixmap(dpi=dpi)
+                    out_png.parent.mkdir(parents=True, exist_ok=True)
+                    tmp_png = out_png.with_suffix(f".tmp.{os.getpid()}_{int(time.time()*1000)}.png")
+                    pix.save(str(tmp_png))
+                    if tmp_png.exists() and tmp_png.stat().st_size > 0:
+                        os.replace(str(tmp_png), str(out_png))
+                        return True
+        except Exception as e:
+            logger.warning("Ошибка атомарной растеризации %s в %s: %s", pdf_path, out_png, e)
+        return False
 
 
 _EMPTY_SHEET_CACHE: Dict[Tuple[str, int], bool] = {}
@@ -575,6 +598,16 @@ class DwgOnDemandManager:
             if proc:
                 try:
                     if proc.poll() is None:
+                        if os.name == "nt":
+                            try:
+                                subprocess.run(
+                                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                    capture_output=True,
+                                    timeout=5,
+                                    close_fds=True,
+                                )
+                            except Exception:
+                                pass
                         proc.terminate()
                         try:
                             proc.wait(timeout=1.0)
@@ -588,6 +621,7 @@ class DwgOnDemandManager:
                         ["taskkill", "/PID", str(acad_pid), "/F"],
                         capture_output=True,
                         timeout=5,
+                        close_fds=True,
                     )
                 except Exception:
                     pass
@@ -613,6 +647,14 @@ class DwgOnDemandManager:
                 if existing.poll() is None:
                     return existing
                 cls._active_workers.pop(key, None)
+
+        # Перед запуском нового воркера всегда останавливаем все старые активные воркеры других файлов
+        cls.stop_all_workers()
+
+        with cls._lock:
+            existing = cls._active_workers.get(key)
+            if existing is not None and existing.poll() is None:
+                return existing
 
             # Запускаем фоновый воркер печати ТОЛЬКО если у пользователя уже открыт AutoCAD.
             # Если AutoCAD не запущен — не поднимаем процесс вовсе.
@@ -659,6 +701,7 @@ class DwgOnDemandManager:
                     errors="replace",
                     bufsize=1,
                     creationflags=creation_flags,
+                    close_fds=True,
                 )
                 cls._active_workers[key] = proc
                 return proc
@@ -737,7 +780,10 @@ def export_dwg_layout_accore(
     layout_name: str = "",
     timeout_sec: int = 120,
 ) -> bool:
-    """Headless AutoCAD PDF export using accoreconsole.exe via Invoke-NativeDwgPdfExport.ps1."""
+    """Headless AutoCAD PDF export using accoreconsole.exe via Invoke-NativeDwgPdfExport.ps1.
+    
+    Protected by global _ACCORE_SEMAPHORE(1) to strictly prevent concurrent CAD processes.
+    """
     script_path = REPO_ROOT / "scripts" / "Invoke-NativeDwgPdfExport.ps1"
     if not script_path.exists():
         logger.warning("Invoke-NativeDwgPdfExport.ps1 not found at %s", script_path)
@@ -760,19 +806,56 @@ def export_dwg_layout_accore(
     creation_flags = 0
     if os.name == "nt":
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+    acquired = _ACCORE_SEMAPHORE.acquire(timeout=timeout_sec + 20)
+    if not acquired:
+        logger.warning("Could not acquire _ACCORE_SEMAPHORE within timeout for %s", input_dwg.name)
+        return False
+
+    proc = None
     try:
-        res = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_sec + 15,
+            encoding="utf-8",
+            errors="replace",
             creationflags=creation_flags,
+            close_fds=True,
         )
+        try:
+            stdout_data, stderr_data = proc.communicate(timeout=timeout_sec + 15)
+        except subprocess.TimeoutExpired:
+            logger.warning("accoreconsole timed out after %d sec for %s; force killing process tree", timeout_sec, input_dwg.name)
+            if os.name == "nt":
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5, close_fds=True)
+                except Exception:
+                    pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return False
+
         if output_pdf.exists() and output_pdf.stat().st_size > 4096:
             return True
-        logger.warning("accoreconsole export incomplete for %s: stdout=%s stderr=%s", input_dwg.name, res.stdout[-300:] if res.stdout else "", res.stderr[-300:] if res.stderr else "")
+        logger.warning("accoreconsole export incomplete for %s: stdout=%s stderr=%s", input_dwg.name, (stdout_data or "")[-300:], (stderr_data or "")[-300:])
     except Exception as e:
         logger.warning("Error running accoreconsole export for %s: %s", input_dwg.name, e)
+        if proc and proc.poll() is None:
+            if os.name == "nt":
+                try:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5, close_fds=True)
+                except Exception:
+                    pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    finally:
+        _ACCORE_SEMAPHORE.release()
     return False
 
 
@@ -781,7 +864,7 @@ def render_dwg_model_progressive(
     target_dir: Path,
     cache_key: str,
     dpi: int = 150,
-    wait_first_sheet_seconds: float = 75.0,
+    wait_first_sheet_seconds: float = 8.0,
     force: bool = False,
 ) -> Dict[str, Any]:
     """Прогрессивный рендеринг DWG-модели: немедленный возврат листа 1 и фоновая печать остальных."""
@@ -907,13 +990,47 @@ def render_dwg_model_progressive(
     if page1_ready:
         _rasterize_pdf_page(page1_pdf, page1_png, dpi)
     else:
-        # Fallback: Use headless accoreconsole if AutoCAD GUI worker is not available or timed out
-        work_dir = target_dir / "workdir"
-        if export_dwg_layout_accore(path, page1_pdf, work_dir, timeout_sec=90):
-            _rasterize_pdf_page(page1_pdf, page1_png, dpi)
-            page1_ready = True
-        elif not page1_png.exists() and thumb_png.exists():
-            page1_png.write_bytes(thumb_png.read_bytes())
+        # Не блокируем HTTP-ответ синхронным вызовом accoreconsole на 90 секунд!
+        # Внимание: НЕ перезаписываем page-1.png файлом header_thumb.png, чтобы не выставлять ложный isComplete.
+        # Если proc (dwg_plot_worker) не запустился (AutoCAD закрыт), запускаем export_dwg_layout_accore в фоновом пуле
+        if not proc:
+            accore_key = str(path.resolve()).casefold()
+            with _ACCORE_JOBS_LOCK:
+                already_running = accore_key in _ACTIVE_ACCORE_JOBS
+                if not already_running:
+                    _ACTIVE_ACCORE_JOBS.add(accore_key)
+
+            if not already_running:
+                work_dir = target_dir / "workdir"
+
+                def _bg_accore_job():
+                    try:
+                        if export_dwg_layout_accore(path, page1_pdf, work_dir, timeout_sec=90):
+                            if _rasterize_pdf_page(page1_pdf, page1_png, dpi):
+                                try:
+                                    item_stat = path.stat()
+                                    manifest_data = {
+                                        "sourcePath": str(path),
+                                        "sourceName": path.name,
+                                        "sourceSize": item_stat.st_size,
+                                        "sourceMtime": int(item_stat.st_mtime),
+                                        "outputDir": str(target_dir),
+                                        "isComplete": True,
+                                        "totalLayouts": 1,
+                                        "validLayouts": 1,
+                                        "layouts": [{"name": "Лист 1", "tabOrder": 1, "plotRotation": 0}],
+                                        "completedPages": {1: {"bytes": page1_png.stat().st_size if page1_png.exists() else 0, "name": "Лист 1"}},
+                                    }
+                                    manifest_path.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
+                                except Exception as err:
+                                    logger.warning("Failed to write manifest in bg_accore: %s", err)
+                    except Exception as ex:
+                        logger.warning("Background export_dwg_layout_accore error for %s: %s", path, ex)
+                    finally:
+                        with _ACCORE_JOBS_LOCK:
+                            _ACTIVE_ACCORE_JOBS.discard(accore_key)
+
+                _BG_EXECUTOR.submit(_bg_accore_job)
 
     # Сбор метаданных листов из manifest.json или кеша событий воркера
     layouts = []
@@ -952,27 +1069,47 @@ def render_dwg_model_progressive(
         for lay in layouts:
             tab = int(lay.get("tabOrder", 1))
             p_png = target_dir / f"page-{tab}.png"
-            p_exists = p_png.exists() and p_png.stat().st_size > 0
+            p_ready = p_png.exists() and p_png.stat().st_size > 35000
+            if p_ready:
+                img_url = f"/cache/dwg/{cache_key}/{p_png.name}"
+                img_bytes = p_png.stat().st_size
+            elif thumb_png.exists():
+                img_url = f"/cache/dwg/{cache_key}/header_thumb.png"
+                img_bytes = thumb_png.stat().st_size
+            else:
+                img_url = f"/cache/dwg/{cache_key}/{p_png.name}"
+                img_bytes = 0
+
             items.append({
                 "page": tab,
                 "name": f"{path.name} · {lay.get('name', f'Лист {tab}')}",
-                "url": f"/cache/dwg/{cache_key}/{p_png.name}",
-                "bytes": p_png.stat().st_size if p_png.exists() else 0,
+                "url": img_url,
+                "bytes": img_bytes,
                 "previewType": "DWG_MODEL",
-                "isEmpty": check_image_is_empty_sheet(p_png) if p_exists else False,
+                "isEmpty": check_image_is_empty_sheet(p_png) if p_ready else False,
             })
     else:
-        p1_exists = page1_png.exists() and page1_png.stat().st_size > 0
+        p1_ready_full = page1_png.exists() and page1_png.stat().st_size > 35000
+        if p1_ready_full:
+            p1_url = f"/cache/dwg/{cache_key}/{page1_png.name}"
+            p1_bytes = page1_png.stat().st_size
+        elif thumb_png.exists():
+            p1_url = f"/cache/dwg/{cache_key}/header_thumb.png"
+            p1_bytes = thumb_png.stat().st_size
+        else:
+            p1_url = f"/cache/dwg/{cache_key}/{page1_png.name}"
+            p1_bytes = 0
+
         items.append({
             "page": 1,
             "name": f"{path.name} · Лист 1",
-            "url": f"/cache/dwg/{cache_key}/{page1_png.name}",
-            "bytes": page1_png.stat().st_size if page1_png.exists() else 0,
+            "url": p1_url,
+            "bytes": p1_bytes,
             "previewType": "DWG_MODEL",
-            "isEmpty": check_image_is_empty_sheet(page1_png) if p1_exists else False,
+            "isEmpty": check_image_is_empty_sheet(page1_png) if p1_ready_full else False,
         })
 
-    is_complete_now = bool(len(items) > 0 and all(it["bytes"] > 0 for it in items))
+    is_complete_now = bool(page1_ready and len(items) > 0 and all((target_dir / f"page-{it['page']}.png").exists() and (target_dir / f"page-{it['page']}.png").stat().st_size > 35000 for it in items))
     empty_pages = [it["page"] for it in items if it.get("bytes", 0) > 0 and it.get("isEmpty")]
     first_content_page = next((it["page"] for it in items if it.get("bytes", 0) > 0 and not it.get("isEmpty")), None)
 
@@ -1007,7 +1144,7 @@ def render_dwg_page_progressive(
     cache_key: str,
     page: int,
     dpi: int = 150,
-    wait_seconds: float = 12.0,
+    wait_seconds: float = 5.0,
 ) -> Dict[str, Any]:
     """Прогрессивный возврат конкретной страницы чертежа DWG с поддержкой DPI (72, 150, 300)."""
     dpi_suffix = "" if dpi == 150 else f"@{dpi}"
@@ -1106,7 +1243,7 @@ def render_dwg_page_progressive(
                 break
             time.sleep(0.5)
 
-    # 4. Fallback: Если AutoCAD GUI воркер не запущен или не отдал PDF — вызываем headless accoreconsole
+    # 4. Fallback: Если AutoCAD GUI воркер не запущен или не отдал PDF — запускаем headless accoreconsole в ФОНЕ!
     if not pdf_path.exists() or pdf_path.stat().st_size <= 4096:
         layout_name = ""
         manifest_p = target_dir / "manifest.json"
@@ -1119,33 +1256,27 @@ def render_dwg_page_progressive(
                         break
             except Exception:
                 pass
-        work_dir = target_dir / "workdir"
-        if export_dwg_layout_accore(file_path, pdf_path, work_dir, layout_name=layout_name, timeout_sec=90):
-            _rasterize_pdf_page(pdf_path, png_path, dpi)
-            if png_path.exists() and png_path.stat().st_size > 0:
-                item = {
-                    "page": page,
-                    "name": f"{file_path.name} · {layout_name or f'стр. {page}'}",
-                    "url": f"/cache/dwg/{cache_key}/{png_name}",
-                    "bytes": png_path.stat().st_size,
-                    "previewType": "DWG_MODEL",
-                    "isEmpty": check_image_is_empty_sheet(png_path),
-                }
-                return {
-                    "name": file_path.name,
-                    "path": str(file_path),
-                    "dpi": dpi,
-                    "page": page,
-                    "cacheKey": cache_key,
-                    "cacheHit": False,
-                    "item": item,
-                    "url": item["url"],
-                    "bytes": item["bytes"],
-                    "sourcePath": str(file_path),
-                    "sourceType": "DWG",
-                    "convertedPdfPath": str(pdf_path),
-                    "convertCacheHit": False,
-                }
+
+        accore_job_key = f"{str(file_path.resolve()).casefold()}::page_{page}"
+        with _ACCORE_JOBS_LOCK:
+            already_running = accore_job_key in _ACTIVE_ACCORE_JOBS
+            if not already_running:
+                _ACTIVE_ACCORE_JOBS.add(accore_job_key)
+
+        if not already_running:
+            work_dir = target_dir / "workdir"
+
+            def _bg_page_accore():
+                try:
+                    if export_dwg_layout_accore(file_path, pdf_path, work_dir, layout_name=layout_name, timeout_sec=90):
+                        _rasterize_pdf_page(pdf_path, png_path, dpi)
+                except Exception as ex:
+                    logger.warning("Background export_dwg_layout_accore for page %s failed: %s", page, ex)
+                finally:
+                    with _ACCORE_JOBS_LOCK:
+                        _ACTIVE_ACCORE_JOBS.discard(accore_job_key)
+
+            _BG_EXECUTOR.submit(_bg_page_accore)
 
     # Если лист еще рендерится, возвращаем превью заголовка
     fallback_url = f"/cache/dwg/{cache_key}/header_thumb.png" if thumb_path.exists() else f"/cache/dwg/{cache_key}/page-1.png"

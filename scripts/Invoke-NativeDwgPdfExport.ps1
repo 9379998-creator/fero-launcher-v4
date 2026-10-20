@@ -119,13 +119,26 @@ function Invoke-NativeDwgPdfExport {
     $outTask = $proc.StandardOutput.ReadToEndAsync()
     $errTask = $proc.StandardError.ReadToEndAsync()
     if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
-      try { $proc.Kill() } catch {}
+      try {
+        & taskkill /F /T /PID $proc.Id | Out-Null
+      } catch {
+        try { $proc.Kill() } catch {}
+      }
       throw ("AutoCAD Core Console timeout ({0} sec)" -f $TimeoutSec)
     }
     try { ($outTask.Result + "`n" + $errTask.Result) | Out-File -LiteralPath $consoleLog -Encoding utf8 -Force } catch {}
   } finally {
-    try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+    try {
+      if (-not $proc.HasExited) {
+        & taskkill /F /T /PID $proc.Id | Out-Null
+      }
+    } catch {
+      try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+    }
     try { $proc.Dispose() } catch {}
+    if (Test-Path -LiteralPath $scrFile) {
+      try { Remove-Item -LiteralPath $scrFile -Force -ErrorAction SilentlyContinue } catch {}
+    }
     if ($stagedLocal -and (Test-Path -LiteralPath $effectiveInput)) {
       try { Remove-Item -LiteralPath $effectiveInput -Force -ErrorAction SilentlyContinue } catch {}
     }

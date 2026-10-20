@@ -9,12 +9,28 @@ DB_PATH = DB_DIR / "launcher.sqlite"
 
 def get_connection() -> sqlite3.Connection:
     DB_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    return conn
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+    except sqlite3.OperationalError as e:
+        if "disk I/O error" in str(e):
+            shm = DB_DIR / "launcher.sqlite-shm"
+            if shm.exists():
+                try:
+                    shm.unlink()
+                except Exception:
+                    pass
+            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
+            return conn
+        raise
 
 def init_db():
     conn = get_connection()

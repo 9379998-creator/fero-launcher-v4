@@ -17,9 +17,14 @@ if (-not (Test-Path -LiteralPath $outputParent)) {
 
 $excel = $null
 $workbook = $null
+$excelPid = $null
 
 try {
+  $existingExcelPids = @(Get-Process -Name "EXCEL" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
   $excel = New-Object -ComObject Excel.Application
+  $newExcelPids = @(Get-Process -Name "EXCEL" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+  $excelPid = ($newExcelPids | Where-Object { $_ -notin $existingExcelPids } | Select-Object -First 1)
+
   $excel.Visible = $false
   $excel.ScreenUpdating = $false
   $excel.DisplayAlerts = $false
@@ -80,6 +85,14 @@ finally {
   }
   [GC]::Collect()
   [GC]::WaitForPendingFinalizers()
+  if ($excelPid) {
+    try {
+      $p = Get-Process -Id $excelPid -ErrorAction SilentlyContinue
+      if ($p -and -not $p.HasExited) {
+        Stop-Process -Id $excelPid -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
 }
 
 if (-not (Test-Path -LiteralPath $OutputPath)) {

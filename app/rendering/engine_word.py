@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import html as _html
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -337,16 +338,58 @@ def word_to_pdf_via_com(src: Path, dst_pdf: Path, convert_script: Path,
     if dst_pdf.exists():
         dst_pdf.unlink()
     t0 = time.perf_counter()
-    process = subprocess.run(
-        ["powershell", "-STA", "-NoProfile", "-ExecutionPolicy", "Bypass",
-         "-File", str(convert_script),
-         "-InputPath", str(src), "-OutputPath", str(dst_pdf)],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout,
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+        kwargs["startupinfo"] = si
+
+    proc = subprocess.Popen(
+        [
+            "powershell",
+            "-STA",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(convert_script),
+            "-InputPath",
+            str(src),
+            "-OutputPath",
+            str(dst_pdf),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        close_fds=True,
+        **kwargs,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    timeout=5,
+                    close_fds=True,
+                )
+            except Exception:
+                pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise TimeoutError(f"Word COM конвертация превысила таймаут {timeout} с")
+
     ms = (time.perf_counter() - t0) * 1000
-    if process.returncode != 0:
-        message = (process.stderr.strip() or process.stdout.strip()
+    if proc.returncode != 0:
+        message = (stderr.strip() or stdout.strip()
                    or "Word не смог конвертировать документ в PDF")
         raise RuntimeError(message)
     if not dst_pdf.exists() or dst_pdf.stat().st_size <= 0:

@@ -6,6 +6,7 @@ import hashlib
 import html
 import io
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -29,6 +30,8 @@ try:
     import openpyxl
 except ImportError:  # pragma: no cover - reported through the local API
     openpyxl = None
+
+logger = logging.getLogger("fero_server")
 
 
 if getattr(sys, 'frozen', False):
@@ -64,8 +67,6 @@ EXCEL_CACHE_DIR = RUNTIME_DIR / "cache" / "excel"
 DWG_CACHE_DIR = RUNTIME_DIR / "cache" / "dwg"
 WORD_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_word_to_pdf.ps1"
 EXCEL_XLS_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_xls_to_xlsx.ps1"
-DWG_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_model_space.ps1"
-DWG_SMART_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_smart.ps1"
 VERSION = "0.4.0-v3-pdf-render"
 APP_VERSION = "3.1.0"
 APP_BRANCH = "dvg-main"
@@ -110,10 +111,6 @@ WORD_CONVERT_TIMEOUT_SECONDS = 120
 EXCEL_CONVERT_TIMEOUT_SECONDS = 180
 DWG_RENDER_TIMEOUT_SECONDS = 600
 DWG_MODEL_PAGE_TIMEOUT_SECONDS = 120
-DWG_DAEMON_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_daemon.ps1"
-DWG_DAEMON_DIR = DWG_CACHE_DIR / "daemon"
-DWG_DAEMON_START_TIMEOUT_SECONDS = 240
-DWG_DAEMON_IDLE_MINUTES = 15
 MAX_XLSX_ROWS = 2000
 MAX_XLSX_COLS = 100
 POPPLER_BIN_DIR = (
@@ -692,6 +689,7 @@ def run_poppler(args: list[str], timeout: int) -> subprocess.CompletedProcess[st
         text=True,
         encoding="utf-8",
         errors="replace",
+        close_fds=True,
         **hidden_process_kwargs(),
     )
     try:
@@ -780,390 +778,22 @@ def word_document_preview(path: Path) -> dict:
 
 
 
-_DWG_DAEMON_LOCK = threading.Lock()
-_DWG_DAEMON_PROC: subprocess.Popen | None = None
-
-
-class _DwgFileError(RuntimeError):
-    """Файл не конвертируется (демон отработал, CAD отказался). Повтор разово бессмысленен."""
-
-
-def _dwg_daemon_files() -> tuple[Path, Path, Path]:
-    """Каталог заданий демона, файл готовности, лог демона."""
-    job_dir = DWG_DAEMON_DIR / "jobs"
-    job_dir.mkdir(parents=True, exist_ok=True)
-    return job_dir, DWG_DAEMON_DIR / "ready.json", RUNTIME_DIR / "logs" / "dwg-daemon.log"
-
-
-def _dwg_daemon_alive() -> bool:
-    proc = _DWG_DAEMON_PROC
-    return proc is not None and proc.poll() is None
-
-
-def ensure_dwg_daemon() -> bool:
-    """Поднять долгоживущий CAD-конвертер (одна сессия на все файлы).
-
-    Возвращает True, если демон готов принимать задания. При любой
-    неудаче возвращает False — вызыватель откатится на разовый запуск.
-    """
-    global _DWG_DAEMON_PROC
-    with _DWG_DAEMON_LOCK:
-        if _dwg_daemon_alive():
-            return True
-        _DWG_DAEMON_PROC = None
-        if not DWG_DAEMON_SCRIPT.exists():
-            return False
-        job_dir, ready_file, log_file = _dwg_daemon_files()
-        for stale in (ready_file, job_dir / "daemon.fatal"):
-            try:
-                if stale.exists():
-                    stale.unlink()
-            except OSError:
-                pass
-        try:
-            _DWG_DAEMON_PROC = subprocess.Popen(
-                [
-                    "powershell",
-                    "-STA",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(DWG_DAEMON_SCRIPT),
-                    "-JobDir",
-                    str(job_dir),
-                    "-ReadyFile",
-                    str(ready_file),
-                    "-LogFile",
-                    str(log_file),
-                    "-IdleMinutes",
-                    str(DWG_DAEMON_IDLE_MINUTES),
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                **hidden_process_kwargs(),
-            )
-        except Exception as err:
-            _DWG_DAEMON_PROC = None
-            return False
-        deadline = time.time() + DWG_DAEMON_START_TIMEOUT_SECONDS
-        while time.time() < deadline:
-            if _DWG_DAEMON_PROC.poll() is not None:
-                _DWG_DAEMON_PROC = None
-                return False
-            if (job_dir / "daemon.fatal").exists():
-                try:
-                    _DWG_DAEMON_PROC.terminate()
-                except Exception:
-                    pass
-                _DWG_DAEMON_PROC = None
-                return False
-            if ready_file.exists():
-                # Проверяем, что ready от ЭТОГО запуска, а не stale от убитого демона.
-                try:
-                    ready_pid = int(
-                        json.loads(ready_file.read_text(encoding="utf-8")).get("pid") or 0
-                    )
-                except Exception:
-                    ready_pid = 0
-                if ready_pid == _DWG_DAEMON_PROC.pid:
-                    return True
-            time.sleep(0.5)
-        try:
-            _DWG_DAEMON_PROC.kill()
-        except Exception:
-            pass
-        _DWG_DAEMON_PROC = None
-        return False
-
-
-def kill_dwg_daemon(reason: str) -> None:
-    """Прибить демона и только СВОЮ CAD-сессию (PID записан демоном при старте).
-
-    Чужие запущенные AutoCAD (пользовательские) не трогаем: их PID
-    старше демона и в ready.json их нет.
-    """
-    global _DWG_DAEMON_PROC
-    with _DWG_DAEMON_LOCK:
-        proc = _DWG_DAEMON_PROC
-        _DWG_DAEMON_PROC = None
-    acad_pid = 0
+def cleanup_dwg_workers() -> None:
+    """Остановить все фоновые воркеры печати DWG и освободить системные ресурсы."""
     try:
-        _, ready_file, _ = _dwg_daemon_files()
-        if ready_file.exists():
-            info = json.loads(ready_file.read_text(encoding="utf-8"))
-            acad_pid = int(info.get("acadPid") or 0)
-    except Exception:
-        acad_pid = 0
-    if proc is not None:
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except Exception:
-                proc.kill()
-        except Exception:
-            pass
-    if acad_pid > 0:
-        try:
-            listed = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {acad_pid}", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                **hidden_process_kwargs(),
-            )
-            if "acad.exe" in listed.stdout.lower():
-                subprocess.run(
-                    ["taskkill", "/PID", str(acad_pid), "/F"],
-                    capture_output=True,
-                    timeout=15,
-                    **hidden_process_kwargs(),
-                )
-        except Exception:
-            pass
-
-
-def dwg_convert_via_daemon(
-    *,
-    input_path: Path,
-    output_path: Path,
-    fallback_path: Path,
-    timeout_seconds: int,
-) -> subprocess.CompletedProcess:
-    """Одно задание демону. Возвращает CompletedProcess как разовый запуск."""
-    if not ensure_dwg_daemon():
-        raise RuntimeError("dwg-daemon unavailable")
-    job_dir, _, _ = _dwg_daemon_files()
-    job_id = hashlib.sha1(os.urandom(16)).hexdigest()
-    job_file = job_dir / f"{job_id}.job.json"
-    done_file = job_dir / f"{job_id}.done.json"
-    job_file.write_text(
-        json.dumps(
-            {
-                "inputPath": str(input_path),
-                "outputPath": str(output_path),
-                "fallbackCachePath": str(fallback_path),
-                "pythonExe": str(sys.executable),
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    deadline = time.time() + timeout_seconds
-    try:
-        while time.time() < deadline:
-            if done_file.exists():
-                payload = json.loads(done_file.read_text(encoding="utf-8"))
-                if payload.get("ok"):
-                    result = payload.get("result") or {}
-                    stdout_line = json.dumps(
-                        {
-                            "ok": True,
-                            "finalPath": result.get("finalPath", ""),
-                            "pageCount": result.get("pageCount", 0),
-                            "progId": result.get("progId", ""),
-                        },
-                        ensure_ascii=False,
-                    )
-                    return subprocess.CompletedProcess(
-                        args=[], returncode=0, stdout=stdout_line + "\n", stderr=""
-                    )
-                raise _DwgFileError(str(payload.get("error") or "CAD daemon failed"))
-            if not _dwg_daemon_alive():
-                raise RuntimeError("CAD daemon died mid-job")
-            time.sleep(0.25)
-    finally:
-        for temp_file in (job_file, done_file):
-            try:
-                temp_file.unlink(missing_ok=True)
-            except OSError:
-                pass
-    kill_dwg_daemon("job-timeout")
-    raise TimeoutError(f"CAD conversion timed out after {timeout_seconds}s")
-
-
-def dwg_convert_oneshot(
-    *,
-    script_to_run: Path,
-    input_path: Path,
-    output_path: Path,
-    fallback_path: Path,
-    timeout_seconds: int,
-) -> subprocess.CompletedProcess:
-    """Старый разовый запуск: новый CAD на каждый файл (fallback демона)."""
-    return subprocess.run(
-        [
-            "powershell",
-            "-STA",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script_to_run),
-            "-InputPath",
-            str(input_path),
-            "-OutputPath",
-            str(output_path),
-            "-FallbackCachePath",
-            str(fallback_path),
-            "-PythonExe",
-            str(sys.executable),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout_seconds,
-        **hidden_process_kwargs(),
-    )
-
-
-def dwg_convert_process(
-    *,
-    path: Path,
-    paired_pdf: Path,
-    fallback_pdf: Path,
-    script_to_run: Path,
-) -> subprocess.CompletedProcess:
-    """Конвертация DWG в PDF: сначала быстрый нативный accoreconsole + _.-EXPORT _PDF, при сбое — CAD-сессия."""
-    # 1. ПРИОРИТЕТ: Консоль accoreconsole.exe + нативная команда _.-EXPORT _PDF.
-    # Запускается за доли секунды, не поднимает GUI, не мигает окнами, не тратит память на ленту.
-    try:
-        proc = dwg_convert_oneshot(
-            script_to_run=script_to_run,
-            input_path=path,
-            output_path=paired_pdf,
-            fallback_path=fallback_pdf,
-            timeout_seconds=DWG_RENDER_TIMEOUT_SECONDS,
-        )
-        if proc.returncode == 0:
-            return proc
+        from app.backend.dwg_engine import DwgOnDemandManager
+        DwgOnDemandManager.stop_all_workers()
     except Exception:
         pass
-
-    # 2. РЕЗЕРВ: CAD COM демон (если accoreconsole не найден)
-    try:
-        return dwg_convert_via_daemon(
-            input_path=path,
-            output_path=paired_pdf,
-            fallback_path=fallback_pdf,
-            timeout_seconds=DWG_RENDER_TIMEOUT_SECONDS,
-        )
-    except (TimeoutError, _DwgFileError):
-        raise
-    except Exception:
-        return dwg_convert_oneshot(
-            script_to_run=script_to_run,
-            input_path=path,
-            output_path=paired_pdf,
-            fallback_path=fallback_pdf,
-            timeout_seconds=DWG_RENDER_TIMEOUT_SECONDS,
-        )
-
-
-def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
-    """Экспорт чертежа DWG в многостраничный векторный PDF через AutoCAD COM.
-
-    Сохраняет парный PDF рядом с исходным DWG-файлом (при наличии прав записи)
-    либо в резервный локальный кэш, если папка защищена от записи.
-    """
-    if not path.exists():
-        raise FileNotFoundError(f"DWG-файл не найден: {path}")
-    if not path.is_file() or path.suffix.casefold() != ".dwg":
-        raise ValueError(f"Это не DWG-файл: {path}")
-
-    # Output PDF is stored strictly inside the runtime cache. Source directory is never written to.
-    key = file_cache_key(path, "dwg-smart-cad-v3")
-    target_dir = DWG_CACHE_DIR / key
-    target_dir.mkdir(parents=True, exist_ok=True)
-    cache_pdf = target_dir / f"{path.stem}.pdf"
-    manifest_path = target_dir / "manifest.json"
-
-    # Verify cache hit with strict completeness check
-    if cache_pdf.exists() and cache_pdf.stat().st_size > 1024 and manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if (
-                manifest.get("sourcePath") == str(path)
-                and manifest.get("isComplete") is True
-                and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
-                and manifest.get("sourceSize") == path.stat().st_size
-            ):
-                return cache_pdf, True
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    script_to_run = DWG_SMART_RENDER_SCRIPT if DWG_SMART_RENDER_SCRIPT.exists() else DWG_RENDER_SCRIPT
-    final_pdf = None
-    try:
-        process = dwg_convert_process(
-            path=path,
-            paired_pdf=cache_pdf,
-            fallback_pdf=cache_pdf,
-            script_to_run=script_to_run,
-        )
-        if process.returncode != 0:
-            message = process.stderr.strip() or process.stdout.strip() or "CAD-система (AutoCAD) не смогла создать PDF для чертежа"
-            raise RuntimeError(message)
-
-        if cache_pdf.exists() and cache_pdf.stat().st_size > 1024:
-            final_pdf = cache_pdf
-        else:
-            for line in reversed((process.stdout or "").splitlines()):
-                line = line.strip()
-                if line.startswith("{") and line.endswith("}"):
-                    try:
-                        data = json.loads(line)
-                        cand = Path(data.get("finalPath", ""))
-                        if cand.exists() and cand.stat().st_size > 1024:
-                            final_pdf = cand
-                            break
-                    except Exception:
-                        pass
-
-        if not final_pdf or not final_pdf.exists() or final_pdf.stat().st_size <= 1024:
-            raise RuntimeError("CAD-система (AutoCAD) не создала PDF-файл для чертежа")
-    except Exception as cad_err:
-        try:
+    if os.name == "nt":
+        for cmd in (
+            ["taskkill", "/F", "/IM", "accoreconsole.exe"],
+            ["taskkill", "/F", "/FI", "WINDOWTITLE eq ", "/IM", "acad.exe"],
+        ):
             try:
-                from app.backend.dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
-            except ImportError:
-                from dwg_engine import extract_raw_thumbnail_from_dwg, _generate_placeholder_png
-            thumb = extract_raw_thumbnail_from_dwg(path)
-            img_bytes = thumb[0] if thumb else _generate_placeholder_png(path.name, "Model")
-
-            # Конвертируем PNG превью чертежа в PDF через fitz (PyMuPDF)
-            import fitz
-            img_doc = fitz.open(stream=img_bytes, filetype="png")
-            pdf_bytes = img_doc.convert_to_pdf()
-            img_doc.close()
-
-            cache_pdf.write_bytes(pdf_bytes)
-            final_pdf = cache_pdf
-        except Exception as fallback_err:
-            raise RuntimeError(f"Сбой рендера DWG: {cad_err} (фолбэк: {fallback_err})")
-
-    if final_pdf == cache_pdf and not manifest_path.exists():
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "sourcePath": str(path),
-                    "sourceName": path.name,
-                    "sourceMtimeNs": path.stat().st_mtime_ns,
-                    "sourceSize": path.stat().st_size,
-                    "cacheKey": key,
-                    "pdfPath": str(cache_pdf),
-                    "mode": "smart-layouts-fallback-cache",
-                    "isComplete": False,
-                    "renderedAt": datetime.now().isoformat(timespec="seconds"),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-    return final_pdf, False
+                subprocess.run(cmd, capture_output=True, timeout=5, close_fds=True, **hidden_process_kwargs())
+            except Exception:
+                pass
 
 
 _DWG_BG_LOCK = threading.Lock()
@@ -1262,7 +892,7 @@ def set_windows_clipboard(text: str) -> bool:
         pass
 
     try:
-        res = subprocess.run(["clip.exe"], input=normalized_text.encode("utf-16le"), check=True, timeout=3)
+        res = subprocess.run(["clip.exe"], input=normalized_text.encode("utf-16le"), check=True, timeout=3, close_fds=True)
         return res.returncode == 0
     except Exception:
         pass
@@ -1273,7 +903,8 @@ def set_windows_clipboard(text: str) -> bool:
             input=normalized_text,
             text=True,
             timeout=3,
-            check=True
+            check=True,
+            close_fds=True
         )
         return True
     except Exception:
@@ -2379,7 +2010,7 @@ def open_in_explorer(path: Path) -> str:
             # Папку открываем явным вызовом проводника отдельными
             # аргументами: склеенная строка вида 'explorer.exe "путь"'
             # через Popen без shell работает ненадёжно.
-            subprocess.Popen(["explorer.exe", resolved])
+            subprocess.Popen(["explorer.exe", resolved], close_fds=True)
             _bring_explorer_to_front(resolved)
             return "explorer-open-folder"
         except Exception:
@@ -2391,7 +2022,7 @@ def open_in_explorer(path: Path) -> str:
     # вида "/select,C:\..." проводник молча игнорирует (окно либо не
     # открывается, либо открывается не та папка).
     try:
-        subprocess.Popen(["explorer.exe", "/select,", resolved])
+        subprocess.Popen(["explorer.exe", "/select,", resolved], close_fds=True)
         _bring_explorer_to_front(target_dir)
         return "explorer-select"
     except Exception:
@@ -2399,7 +2030,7 @@ def open_in_explorer(path: Path) -> str:
             os.startfile(target_dir)
             return "explorer-open-dir-fallback"
         except Exception:
-            subprocess.Popen(["explorer.exe", target_dir])
+            subprocess.Popen(["explorer.exe", target_dir], close_fds=True)
             return "explorer-open-dir-subp"
 
 
@@ -2472,7 +2103,7 @@ def launch_custom_app(exe_path: str, file_path: Path) -> str:
     norm_ext = normalize_file_extension(file_path)
 
     if os.name != "nt":
-        subprocess.Popen([resolved_exe, resolved_file], cwd=file_dir)
+        subprocess.Popen([resolved_exe, resolved_file], cwd=file_dir, close_fds=True)
         return f"custom-app:{Path(resolved_exe).name}"
 
     # Для DWG/DXF или если указан AutoCAD (acad.exe / AcLauncher.exe):
@@ -2494,6 +2125,7 @@ def launch_custom_app(exe_path: str, file_path: Path) -> str:
                     [resolved_exe, "/O", resolved_file],
                     cwd=file_dir,
                     creationflags=creationflags,
+                    close_fds=True,
                 )
                 bring_native_window_to_front(proc.pid, "acad.exe")
                 _bring_window_to_front(None, None, 120.0, file_path.name, 3)
@@ -2518,6 +2150,7 @@ def launch_custom_app(exe_path: str, file_path: Path) -> str:
             [resolved_exe, resolved_file],
             cwd=file_dir,
             creationflags=creationflags,
+            close_fds=True,
         )
         bring_native_window_to_front(proc.pid, resolved_exe)
         _bring_window_to_front(None, None, 120.0, file_path.name, 3)
@@ -2653,7 +2286,7 @@ def excel_convert_xls_to_xlsx(path: Path) -> tuple[Path, bool]:
     if xlsx_path.exists():
         xlsx_path.unlink()
 
-    process = subprocess.run(
+    proc = subprocess.Popen(
         [
             "powershell",
             "-STA",
@@ -2667,15 +2300,36 @@ def excel_convert_xls_to_xlsx(path: Path) -> tuple[Path, bool]:
             "-OutputPath",
             str(xlsx_path),
         ],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=EXCEL_CONVERT_TIMEOUT_SECONDS,
+        close_fds=True,
         **hidden_process_kwargs(),
     )
-    if process.returncode != 0:
-        message = process.stderr.strip() or process.stdout.strip() or "Excel не смог сконвертировать книгу XLS"
+    try:
+        stdout, stderr = proc.communicate(timeout=EXCEL_CONVERT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    timeout=5,
+                    close_fds=True,
+                    **hidden_process_kwargs(),
+                )
+            except Exception:
+                pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise TimeoutError(f"Конвертация XLS превысила таймаут {EXCEL_CONVERT_TIMEOUT_SECONDS} с")
+
+    if proc.returncode != 0:
+        message = stderr.strip() or stdout.strip() or "Excel не смог сконвертировать книгу XLS"
         raise RuntimeError(message)
     if not xlsx_path.exists() or xlsx_path.stat().st_size <= 0:
         raise RuntimeError("Excel не создал XLSX для preview")
@@ -3928,14 +3582,16 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if total_layouts > 0 and len(ready_pages) >= total_layouts:
                     is_complete = True
 
-                # Проверяем, активен ли рабочий процесс фонового плоттера
+                # Проверяем, активен ли рабочий процесс фонового плоттера или accoreconsole
                 worker_active = False
                 try:
-                    from app.backend.dwg_engine import DwgOnDemandManager
+                    from app.backend.dwg_engine import DwgOnDemandManager, is_accore_job_active
                     with DwgOnDemandManager._lock:
                         proc = DwgOnDemandManager._active_workers.get(str(file_path.resolve()).casefold())
                         if proc is not None and proc.poll() is None:
                             worker_active = True
+                    if not worker_active and is_accore_job_active(file_path):
+                        worker_active = True
                 except Exception:
                     pass
 
@@ -4309,7 +3965,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                                 from app.backend.dwg_engine import _rasterize_pdf_page
                             except ImportError:
                                 from dwg_engine import _rasterize_pdf_page
-                            _rasterize_pdf_page(pdf_candidate, target, DEFAULT_PDF_DPI)
+                            _rasterize_pdf_page(pdf_candidate, target, DWG_PREVIEW_DPI)
 
             if relative.startswith("pdf/"):
                 parts = relative.split("/")
@@ -4420,6 +4076,23 @@ class LauncherHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class SingleInstanceHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with SO_REUSEADDR and strict HANDLE_FLAG_INHERIT=0 on Windows."""
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def server_bind(self):
+        super().server_bind()
+        if os.name == "nt":
+            try:
+                os.set_inheritable(self.socket.fileno(), False)
+                ctypes.windll.kernel32.SetHandleInformation(
+                    int(self.socket.fileno()), 1, 0  # HANDLE_FLAG_INHERIT = 1, 0 = disable inheritance
+                )
+            except Exception as e:
+                logger.warning("Could not set socket non-inheritable: %s", e)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run F-Engineering Launcher v3 local server.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -4438,7 +4111,7 @@ def main() -> None:
     except Exception as init_err:
         print(f"[Startup Warn] Native apps initialization skipped: {init_err}", file=sys.stderr, flush=True)
 
-    atexit.register(lambda: kill_dwg_daemon("server-exit"))
+    atexit.register(cleanup_dwg_workers)
 
     # Initialize SQLite DB
     import app.backend.db as db
@@ -4449,7 +4122,15 @@ def main() -> None:
     bg.start_background_sync()
 
     try:
-        server = ThreadingHTTPServer((args.host, args.port), LauncherHandler)
+        server = SingleInstanceHTTPServer((args.host, args.port), LauncherHandler)
+        if os.name == "nt":
+            try:
+                os.set_inheritable(server.socket.fileno(), False)
+                ctypes.windll.kernel32.SetHandleInformation(
+                    int(server.socket.fileno()), 1, 0  # HANDLE_FLAG_INHERIT = 1, 0 = disable inheritance
+                )
+            except Exception:
+                pass
     except OSError as err:
         if getattr(err, "winerror", None) == 10048 or getattr(err, "errno", None) == 10048 or "10048" in str(err):
             print(f"ERROR: Port {args.port} is already in use by another process: {err}", file=sys.stderr, flush=True)

@@ -9,10 +9,14 @@ DWG→PDF конвертация остается в существующем DW
 from __future__ import annotations
 
 import hashlib
+import os
+import threading
 import time
 from pathlib import Path
 
 PREVIEW_DPI = 150
+
+_FITZ_LOCK = threading.Lock()
 
 
 def cache_key(source: Path, dpi: int, page: int) -> str:
@@ -23,36 +27,41 @@ def cache_key(source: Path, dpi: int, page: int) -> str:
 
 def page_count(pdf_path: Path) -> int:
     """Число страниц PDF без полного рендера."""
-    import fitz
-    doc = fitz.open(str(pdf_path))
-    try:
-        return len(doc)
-    finally:
-        doc.close()
+    with _FITZ_LOCK:
+        import fitz
+        doc = fitz.open(str(pdf_path))
+        try:
+            return len(doc)
+        finally:
+            doc.close()
 
 
 def render_page(pdf_path: Path, page_index: int, out_png: Path,
                 dpi: int = PREVIEW_DPI) -> dict:
-    """Отрендерить одну страницу в PNG. Возвращает метаданные."""
-    import fitz
-    t0 = time.perf_counter()
-    doc = fitz.open(str(pdf_path))
-    try:
-        pix = doc[page_index].get_pixmap(
-            matrix=fitz.Matrix(dpi / 72.0, dpi / 72.0), alpha=False)
-        width, height = pix.width, pix.height
-        out_png.parent.mkdir(parents=True, exist_ok=True)
-        pix.save(str(out_png))
-    finally:
-        doc.close()
-    ms = (time.perf_counter() - t0) * 1000
+    """Отрендерить одну страницу в PNG с атомарной записью под _FITZ_LOCK. Возвращает метаданные."""
+    with _FITZ_LOCK:
+        import fitz
+        t0 = time.perf_counter()
+        doc = fitz.open(str(pdf_path))
+        try:
+            pix = doc[page_index].get_pixmap(
+                matrix=fitz.Matrix(dpi / 72.0, dpi / 72.0), alpha=False)
+            width, height = pix.width, pix.height
+            out_png.parent.mkdir(parents=True, exist_ok=True)
+            tmp_png = out_png.with_suffix(f".tmp.{os.getpid()}_{int(time.time()*1000)}.png")
+            pix.save(str(tmp_png))
+            if tmp_png.exists() and tmp_png.stat().st_size > 0:
+                os.replace(str(tmp_png), str(out_png))
+        finally:
+            doc.close()
+        ms = (time.perf_counter() - t0) * 1000
     return {
         "path": str(out_png),
         "page": page_index,
         "dpi": dpi,
         "width": width,
         "height": height,
-        "bytes": out_png.stat().st_size,
+        "bytes": out_png.stat().st_size if out_png.exists() else 0,
         "renderMs": round(ms, 1),
     }
 

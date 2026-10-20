@@ -12,6 +12,7 @@ from ctypes import wintypes
 import json
 import os
 import shutil
+import struct
 import socket
 import subprocess
 import sys
@@ -251,14 +252,14 @@ def get_pids_on_port(port: int) -> set[int]:
 
 
 def shutdown_server(proc, port: int | None = None) -> None:
-    # 1. Завершаем серверный процесс и его дерево процессов без вызова консольных утилит
+    # 1. Завершаем серверный процесс и его дерево процессов
     if proc:
         try:
             if proc.poll() is None:
                 log(f"Shutting down server pid {proc.pid}...")
                 kill_process_tree_silent(proc.pid)
                 try:
-                    proc.wait(timeout=1.0)
+                    proc.wait(timeout=1.5)
                 except Exception:
                     pass
                 log(f"Server pid {proc.pid} stopped successfully")
@@ -266,25 +267,29 @@ def shutdown_server(proc, port: int | None = None) -> None:
             log(f"Error during shutdown_server proc: {e}")
 
     # 2. Если сервер работал на порту (даже если был найден ранее запущенным)
-    if port:
-        for pid in get_pids_on_port(port):
-            try:
-                log(f"Killing listener process pid {pid} on port {port}...")
-                kill_process_tree_silent(pid)
-            except Exception:
-                pass
-
-    # 3. Гарантированно зачищаем любые осиротевшие невидимые фоновые сессии AutoCAD без окон
-    if os.name == "nt":
+    target_port = port or 8780
+    for pid in get_pids_on_port(target_port):
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/FI", "WINDOWTITLE eq ", "/IM", "acad.exe"],
-                capture_output=True,
-                timeout=5,
-                **hidden_process_kwargs(),
-            )
+            log(f"Killing listener process pid {pid} on port {target_port}...")
+            kill_process_tree_silent(pid)
         except Exception:
             pass
+
+    # 3. Гарантированно зачищаем любые осиротевшие дочерние воркеры AutoCAD (accoreconsole, скрытый acad)
+    if os.name == "nt":
+        for cmd in (
+            ["taskkill", "/F", "/IM", "accoreconsole.exe"],
+            ["taskkill", "/F", "/FI", "WINDOWTITLE eq ", "/IM", "acad.exe"],
+        ):
+            try:
+                subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=5,
+                    **hidden_process_kwargs(),
+                )
+            except Exception:
+                pass
 
 
 def log(msg: str) -> None:
@@ -321,75 +326,135 @@ def is_port_free(port: int) -> bool:
         return False
 
 
-def reap_stale_server(port: int) -> None:
-    # Порт занят, но сервер на нём не отвечает: гасим зависший процесс,
-    # если это точно процесс лаунчера. Чужие процессы не трогаем.
-    try:
-        out = subprocess.run(
-            ["netstat", "-ano", "-p", "TCP"],
-            capture_output=True, text=True, timeout=10,
-            **hidden_process_kwargs(),
-        ).stdout
-    except Exception:
+def _force_close_process_handles(pid: int) -> None:
+    """Принудительно отозвать зависшие дескрипторы у зомби-процесса через DUPLICATE_CLOSE_SOURCE."""
+    if os.name != "nt":
         return
-    pids = set()
-    for line in (out or "").splitlines():
-        parts = line.split()
-        if len(parts) >= 5 and parts[0] == "TCP" \
-                and parts[1].endswith(":%d" % port) and parts[3] == "LISTENING":
-            if parts[4].isdigit():
-                pids.add(parts[4])
-    for pid in pids:
+    try:
+        ntdll = ctypes.windll.ntdll
+        k32 = ctypes.windll.kernel32
+        PROCESS_DUP_HANDLE = 0x0040
+        hProcess = k32.OpenProcess(PROCESS_DUP_HANDLE, False, int(pid))
+        if not hProcess:
+            return
         try:
-            kill_process_tree_silent(int(pid))
-            log(f"Reaped stale launcher server pid {pid} on port {port}")
-        except Exception:
-            pass
+            buf_size = 1024 * 1024 * 32
+            buf = ctypes.create_string_buffer(buf_size)
+            ret_len = ctypes.c_ulong()
+            if ntdll.NtQuerySystemInformation(64, buf, buf_size, ctypes.byref(ret_len)) == 0:
+                raw = buf.raw
+                num_handles = struct.unpack_from("Q", raw, 0)[0]
+                offset = 16
+                entry_size = 40
+                for _ in range(num_handles):
+                    _, p_id, hval = struct.unpack_from("QQQ", raw, offset)
+                    if p_id == pid:
+                        k32.DuplicateHandle(hProcess, ctypes.c_void_p(hval), None, None, 0, False, 1)
+                    offset += entry_size
+        finally:
+            k32.CloseHandle(hProcess)
+    except Exception as e:
+        log(f"Force close handles for pid {pid} error: {e}")
+
+
+def reap_stale_server(port: int = 8780) -> None:
+    """Убить любые зависшие процессы бэкенда, освободить порт 8780."""
+    my_pid = os.getpid()
+
+    # 1. Поиск PID на порту
+    pids = get_pids_on_port(port)
+    for pid in pids:
+        if pid != my_pid:
+            try:
+                kill_process_tree_silent(int(pid))
+                log(f"Reaped stale listener pid {pid} on port {port}")
+            except Exception:
+                pass
+
+    # 2. Поиск любых python.exe / pythonw.exe с server.py в командной строке
+    try:
+        import psutil
+        for p in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if p.pid == my_pid:
+                    continue
+                name = (p.info.get("name") or "").lower()
+                if "python" in name:
+                    cmdline = " ".join(p.info.get("cmdline") or []).lower()
+                    if "server.py" in cmdline:
+                        log(f"Reaped stale server.py process pid {p.pid}")
+                        kill_process_tree_silent(p.pid)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 3. Гарантированно гасим accoreconsole.exe и фоновые acad.exe (/Automation)
+    if os.name == "nt":
+        for cmd in (
+            ["taskkill", "/F", "/IM", "accoreconsole.exe"],
+            ["taskkill", "/F", "/FI", "WINDOWTITLE eq ", "/IM", "acad.exe"],
+        ):
+            try:
+                subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=5,
+                    close_fds=True,
+                    **hidden_process_kwargs(),
+                )
+            except Exception:
+                pass
+
+    # 4. Если порт все еще удерживается зомби-дескриптором, отзываем дескрипторы
+    pids_remaining = get_pids_on_port(port)
+    for r_pid in pids_remaining:
+        if r_pid != my_pid:
+            _force_close_process_handles(r_pid)
 
 
 def find_or_start_server() -> tuple[int, subprocess.Popen | None]:
-    # 1. Проверяем, может сервер уже работает на основном порту 8780
-    if is_server_healthy(8780):
-        log("Found healthy server on primary port 8780")
-        return 8780, None
+    target_port = 8780
 
-    # Если порт 8780 занят, но НЕ здоров — сносим зомби-процесс
-    if not is_port_free(8780):
-        log("Port 8780 is occupied but unhealthy; reaping stale server...")
-        reap_stale_server(8780)
-        time.sleep(0.5)
+    # 1. Проверяем, работает ли уже здоровый сервер на основном порту 8780
+    if is_server_healthy(target_port):
+        log("Found healthy server on primary port 8780, reusing instance")
+        return target_port, None
 
-    # 2. Если 8780 свободен, выбираем его; иначе проверяем диапазон 8781..8789
-    target_port = None
-    if is_port_free(8780):
-        target_port = 8780
-    else:
-        for p in range(8781, 8790):
-            if is_server_healthy(p):
-                log(f"Found already healthy server on port {p}")
-                return p, None
-            if not is_port_free(p):
-                reap_stale_server(p)
-                time.sleep(0.3)
-            if is_port_free(p):
-                target_port = p
-                break
-
-    if target_port is None:
-        target_port = 8780
+    # 2. Если порт 8780 занят, но НЕ здоров — принудительно зачищаем старые процессы
+    log("Port 8780 is occupied or unhealthy; reaping stale server process tree...")
+    reap_stale_server(target_port)
+    wait_deadline = time.time() + 3.0
+    while time.time() < wait_deadline:
+        if is_port_free(target_port):
+            break
+        time.sleep(0.3)
+        reap_stale_server(target_port)
 
     log(f"Starting backend on port {target_port}")
-    # Запускаем server.py скрыто: никаких чёрных окон консоли
     python_exe = _backend_python()
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+    # Перенаправляем stdout и stderr в runtime/logs/server_startup.log для мгновенной фиксации ошибок старта
+    startup_log_path = os.path.join(LOGS_DIR, "server_startup.log")
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    try:
+        startup_log = open(startup_log_path, "a", encoding="utf-8")
+        startup_log.write(f"\n--- [{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting backend on port {target_port} ---\n")
+        startup_log.flush()
+    except Exception as e:
+        log(f"Could not open server_startup.log: {e}")
+        startup_log = subprocess.DEVNULL
+
     server_proc = subprocess.Popen(
         [python_exe, BACKEND, "--port", str(target_port)],
         cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=startup_log,
+        stderr=startup_log,
         creationflags=creationflags,
+        close_fds=True,
     )
 
     # Привязываем дочерний процесс сервера к Windows Job Object с авто-завершением
@@ -397,6 +462,9 @@ def find_or_start_server() -> tuple[int, subprocess.Popen | None]:
 
     deadline = time.time() + 20
     while time.time() < deadline:
+        if server_proc.poll() is not None:
+            log(f"Backend process pid {server_proc.pid} exited prematurely with return code {server_proc.returncode}!")
+            break
         if is_server_healthy(target_port):
             log(f"Server on port {target_port} became healthy (pid {server_proc.pid})")
             return target_port, server_proc
@@ -470,7 +538,7 @@ def show_startup_error(message: str) -> None:
 def focus_existing_window() -> bool:
     try:
         user32 = ctypes.windll.user32
-        for t in [TITLE, "FLauncher"]:
+        for t in [TITLE, "F.E.R.O. Launcher v4", "F.E.R.O. Launcher", "FLauncher"]:
             hwnd = user32.FindWindowW(None, t)
             if hwnd:
                 user32.ShowWindow(hwnd, 9)  # SW_RESTORE
@@ -501,20 +569,61 @@ def open_browser_window(url: str) -> None:
 
 def main():
     readiness_deadline = time.time() + READINESS_TIMEOUT_SECONDS
+    mutex = None
     try:
         mutex = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         mutex.bind(("127.0.0.1", GUI_MUTEX_PORT))
+        if os.name == "nt":
+            try:
+                os.set_inheritable(mutex.fileno(), False)
+                ctypes.windll.kernel32.SetHandleInformation(
+                    int(mutex.fileno()), 1, 0  # HANDLE_FLAG_INHERIT = 1, 0 = disable inheritance
+                )
+            except Exception:
+                pass
     except OSError:
-        # Fail-closed single instance: try to focus, then ALWAYS exit
-        # without starting backend or window — never spawn a second UI.
+        # Проверяем, действительно ли живо окно лаунчера
         try:
             if focus_existing_window():
                 log("Focused existing window, exiting duplicate process")
+                return
             else:
-                log("Mutex busy and existing window could not be focused; exiting without backend/window")
-        except Exception:
-            pass
-        return
+                log("Mutex busy and existing window could not be focused; checking for stale lock...")
+                # Если окно не найдено — старый процесс завис или зомби.
+                # Принудительно убиваем зависшие процессы, удерживающие GUI_MUTEX_PORT (8799)
+                stale_pids = get_pids_on_port(GUI_MUTEX_PORT)
+                for pid in stale_pids:
+                    try:
+                        log(f"Killing stale mutex holder pid {pid} on port {GUI_MUTEX_PORT}")
+                        kill_process_tree_silent(int(pid))
+                    except Exception:
+                        pass
+                # Ждем до 2.0 секунд освобождения сокета после завершения процесса
+                wait_deadline = time.time() + 2.0
+                rebound = False
+                while time.time() < wait_deadline:
+                    try:
+                        mutex = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        mutex.bind(("127.0.0.1", GUI_MUTEX_PORT))
+                        if os.name == "nt":
+                            try:
+                                os.set_inheritable(mutex.fileno(), False)
+                                ctypes.windll.kernel32.SetHandleInformation(
+                                    int(mutex.fileno()), 1, 0
+                                )
+                            except Exception:
+                                pass
+                        log("Successfully rebound GUI mutex port after reaping stale holder")
+                        rebound = True
+                        break
+                    except OSError:
+                        time.sleep(0.3)
+                if not rebound:
+                    log("Mutex port still busy after reaping attempt, exiting")
+                    return
+        except Exception as e:
+            log(f"Mutex recovery failed: {e}")
+            return
 
     port, server_proc = find_or_start_server()
     atexit.register(lambda: shutdown_server(server_proc, port))

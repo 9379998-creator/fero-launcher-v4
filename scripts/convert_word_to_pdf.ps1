@@ -17,9 +17,14 @@ if (-not (Test-Path -LiteralPath $outputParent)) {
 
 $word = $null
 $document = $null
+$wordPid = $null
 
 try {
+  $existingWordPids = @(Get-Process -Name "WINWORD" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
   $word = New-Object -ComObject Word.Application
+  $newWordPids = @(Get-Process -Name "WINWORD" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+  $wordPid = ($newWordPids | Where-Object { $_ -notin $existingWordPids } | Select-Object -First 1)
+
   $word.Visible = $false
   $word.ScreenUpdating = $false
   $word.DisplayAlerts = 0
@@ -30,15 +35,23 @@ try {
 }
 finally {
   if ($document -ne $null) {
-    $document.Close($false)
-    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($document) | Out-Null
+    try { $document.Close($false) } catch {}
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($document) | Out-Null } catch {}
   }
   if ($word -ne $null) {
-    $word.Quit()
-    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null
+    try { $word.Quit() } catch {}
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) | Out-Null } catch {}
   }
   [GC]::Collect()
   [GC]::WaitForPendingFinalizers()
+  if ($wordPid) {
+    try {
+      $p = Get-Process -Id $wordPid -ErrorAction SilentlyContinue
+      if ($p -and -not $p.HasExited) {
+        Stop-Process -Id $wordPid -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
 }
 
 if (-not (Test-Path -LiteralPath $OutputPath)) {

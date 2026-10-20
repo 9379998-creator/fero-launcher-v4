@@ -47,6 +47,7 @@ const state = {
   diffFilter: false,
   diffPollTimer: null,
   dwgPollTimer: null,
+  dwgStatusAbortController: null,
   activeDwgPath: "",
   viewMode: "standard",
   viewerDpi: Number(localStorage.getItem("launcher_viewer_dpi")) || 150,
@@ -480,6 +481,12 @@ function stopDwgStatusPolling() {
     clearInterval(state.dwgPollTimer);
     state.dwgPollTimer = null;
   }
+  if (state.dwgStatusAbortController) {
+    try {
+      state.dwgStatusAbortController.abort();
+    } catch (_) {}
+    state.dwgStatusAbortController = null;
+  }
   state.activeDwgPath = "";
 }
 
@@ -487,9 +494,11 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
   stopDwgStatusPolling();
   if (!filePath) return;
   state.activeDwgPath = filePath;
+  const pollController = new AbortController();
+  state.dwgStatusAbortController = pollController;
 
   state.dwgPollTimer = setInterval(async () => {
-    if (state.renderEpoch !== epoch || state.progressCancelled || state.activeDwgPath !== filePath) {
+    if (state.renderEpoch !== epoch || state.progressCancelled || state.activeDwgPath !== filePath || pollController.signal.aborted) {
       stopDwgStatusPolling();
       return;
     }
@@ -498,11 +507,27 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ file: filePath }),
+        signal: pollController.signal,
       });
-      if (!resp.ok) return;
-      const data = await resp.json();
-      if (state.renderEpoch !== epoch || state.activeDwgPath !== filePath) {
+      if (state.renderEpoch !== epoch || state.progressCancelled || state.activeDwgPath !== filePath || pollController.signal.aborted) {
         stopDwgStatusPolling();
+        return;
+      }
+      if (!resp.ok) {
+        if (resp.status >= 400) {
+          stopDwgStatusPolling();
+          showOperationError(new Error(`Ошибка сервера при проверке статуса DWG (HTTP ${resp.status})`));
+        }
+        return;
+      }
+      const data = await resp.json();
+      if (state.renderEpoch !== epoch || state.progressCancelled || state.activeDwgPath !== filePath) {
+        stopDwgStatusPolling();
+        return;
+      }
+      if (data.status === "error" || data.error) {
+        stopDwgStatusPolling();
+        showOperationError(new Error(data.error || "Ошибка рендеринга DWG"));
         return;
       }
 
@@ -618,6 +643,7 @@ function startDwgStatusPolling(filePath, totalPages, epoch) {
         stopDwgStatusPolling();
       }
     } catch (err) {
+      if (err?.name === "AbortError") return;
       console.warn("DWG status poll error:", err);
     }
   }, 1500);
@@ -4173,6 +4199,8 @@ function formatEta(ms) {
 }
 
 async function renderExcelWorkbooks(excelFiles, options = {}) {
+  stopProgress(false, true);
+  const myEpoch = (state.renderEpoch = (state.renderEpoch || 0) + 1);
   setTreeBrowseMode(false);
   const isSingle = Boolean(options.singleFile) || excelFiles.length === 1;
   if (options.fullView) {
@@ -4193,7 +4221,7 @@ async function renderExcelWorkbooks(excelFiles, options = {}) {
   const workbooks = [];
   const failed = [];
   for (let index = 0; index < excelFiles.length; index += 1) {
-    if (state.progressCancelled) {
+    if (state.progressCancelled || state.renderEpoch !== myEpoch) {
       beaconPerf("excel-open-cancelled", 0, `before-fetch ${excelFiles.length} files`);
       return;
     }
@@ -4210,7 +4238,7 @@ async function renderExcelWorkbooks(excelFiles, options = {}) {
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
-      if (state.progressCancelled) return;
+      if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || `Не удалось прочитать файл: ${excelFile.name}`);
       workbooks.push(payload);
@@ -4224,7 +4252,7 @@ async function renderExcelWorkbooks(excelFiles, options = {}) {
       els.progressDetail.textContent = `Готово ${workbooks.length} из ${excelFiles.length}: ${excelFile.name}`;
     } catch (err) {
       clearTimeout(timeoutId);
-      if (state.progressCancelled) {
+      if (state.progressCancelled || state.renderEpoch !== myEpoch) {
         beaconPerf("excel-open-cancelled", 0, excelFile.name || "");
         return;
       }
@@ -4236,7 +4264,7 @@ async function renderExcelWorkbooks(excelFiles, options = {}) {
       els.progressDetail.textContent = `Ошибка в книге ${index + 1} из ${excelFiles.length}: ${excelFile.name} — пропускаем`;
     }
   }
-  if (state.progressCancelled) {
+  if (state.progressCancelled || state.renderEpoch !== myEpoch) {
     beaconPerf("excel-open-cancelled", 0, `before-show ${workbooks.length} books`);
     return;
   }
@@ -4248,15 +4276,18 @@ async function renderExcelWorkbooks(excelFiles, options = {}) {
   await showExcelWorkbooks(workbooks, { isSingle, fullView: options.fullView });
   // Ждать рисунок листа только если сразу открывается большое окно.
   // Несколько книг: лента уже должна быть видна, полоску на 20 секунд не держать.
-  if (!state.progressCancelled && isSingle) {
+  if (!state.progressCancelled && state.renderEpoch === myEpoch && isSingle) {
     await waitForExcelSheetPaint(20000).catch(() => {});
   }
+  if (state.renderEpoch !== myEpoch) return;
   const sheets = workbooks.reduce((total, workbook) => total + (workbook.sheets?.length || 0), 0);
   const doneText = `Готово ${workbooks.length} из ${excelFiles.length} книг · ${sheets} листов · лимит ${workbooks[0]?.maxRows || 2000} строк на лист`;
   finishProgress(failed.length ? `${doneText} · ошибок: ${failed.length}` : doneText);
 }
 
 async function renderWordDocuments(wordFiles, options = {}) {
+  stopProgress(false, true);
+  const myEpoch = (state.renderEpoch = (state.renderEpoch || 0) + 1);
   setTreeBrowseMode(false);
   const isSingle = Boolean(options.singleFile) || wordFiles.length === 1;
   if (options.fullView) {
@@ -4275,7 +4306,7 @@ async function renderWordDocuments(wordFiles, options = {}) {
   const documents = [];
   const failed = [];
   for (let index = 0; index < wordFiles.length; index += 1) {
-    if (state.progressCancelled) {
+    if (state.progressCancelled || state.renderEpoch !== myEpoch) {
       return;
     }
     const wordFile = wordFiles[index];
@@ -4291,7 +4322,7 @@ async function renderWordDocuments(wordFiles, options = {}) {
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
-      if (state.progressCancelled) return;
+      if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || `Не удалось прочитать файл: ${wordFile.name}`);
       documents.push({ path: wordFile.path, name: wordFile.name, ...payload });
@@ -4305,7 +4336,7 @@ async function renderWordDocuments(wordFiles, options = {}) {
       els.progressDetail.textContent = `Готово ${documents.length} из ${wordFiles.length}: ${wordFile.name}`;
     } catch (err) {
       clearTimeout(timeoutId);
-      if (state.progressCancelled) return;
+      if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
       const isTimeout = err?.name === "AbortError";
       const errMsg = isTimeout
         ? `Не удалось прочитать файл (превышено время ожидания ${timeoutSec} с)`
@@ -4314,13 +4345,14 @@ async function renderWordDocuments(wordFiles, options = {}) {
       els.progressDetail.textContent = `Ошибка в документе ${index + 1} из ${wordFiles.length}: ${wordFile.name} — пропускаем`;
     }
   }
-  if (state.progressCancelled) return;
+  if (state.progressCancelled || state.renderEpoch !== myEpoch) return;
   if (!documents.length) {
     const firstError = failed[0] || `Не удалось прочитать файл: ${wordFiles[0]?.name || "Word"}`;
     showOperationError(new Error(firstError));
     return;
   }
   await showWordDocuments(documents, { isSingle, fullView: options.fullView });
+  if (state.renderEpoch !== myEpoch) return;
   const doneText = `Готово ${documents.length} из ${wordFiles.length} документов Word`;
   finishProgress(failed.length ? `${doneText} · ошибок: ${failed.length}` : doneText);
 }

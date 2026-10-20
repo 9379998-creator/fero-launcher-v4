@@ -5,14 +5,19 @@ from pathlib import Path
 from app.backend.db import get_connection
 
 def hash_file(path: Path) -> str:
-    hasher = hashlib.blake2b()
     try:
+        stat = path.stat()
+        # Для очень больших файлов (>50 МБ) в фоне используем быстрый хэш метаданных, чтобы не вешать диск
+        if stat.st_size > 50 * 1024 * 1024:
+            raw = f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8")
+            return hashlib.blake2b(raw).hexdigest()
+        hasher = hashlib.blake2b()
         with path.open("rb") as f:
             for chunk in iter(lambda: f.read(65536), b""):
                 hasher.update(chunk)
+        return hasher.hexdigest()
     except OSError:
         return ""
-    return hasher.hexdigest()
 
 def background_hashing_worker():
     conn = get_connection()
@@ -25,21 +30,21 @@ def background_hashing_worker():
         try:
             cursor = conn.cursor()
             
-            # Fetch pending docs
+            # Fetch pending docs (небольшими порциями)
             cursor.execute("""
                 SELECT d.id, d.rel_path, r.path as root_path, d.observed_revision, d.verified_content_hash
                 FROM documents d
                 JOIN roots r ON d.root_id = r.id
                 WHERE d.hash_state = 'pending'
-                LIMIT 10
+                LIMIT 5
             """)
             docs = cursor.fetchall()
             
             if not docs:
-                time.sleep(2)
+                time.sleep(5.0)
                 continue
                 
-            time.sleep(0.05) # Cooperative yield between batches
+            time.sleep(0.2) # Щадящая задержка между пачками для экономии диска
                 
             for doc in docs:
                 doc_id = doc["id"]
