@@ -1,0 +1,65 @@
+# Task 005 - сбор данных ПОСЛЕ теста этапа 1 (Part 8)
+
+## F. Время рендера (по журналу запросов) [status: ok]
+```
+﻿20/Oct/2026 15:54:39 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:41 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:42 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:44 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:45 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:47 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:48 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:50 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:51 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:53 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:55 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:56 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:57 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:54:59 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:00 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:02 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:03 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:05 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:06 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:08 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:09 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:11 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:12 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:14 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:16 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:17 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:18 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:20 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:21 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:23 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:24 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:26 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:28 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:29 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:30 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:32 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:33 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:35 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:36 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:38 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:39 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:41 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:42 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:44 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:45 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:47 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:48 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:50 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:51 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:53 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:54 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:56 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:57 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:55:59 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:56:00 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:56:02 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:56:05 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:56:06 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:56:08 - "POST /api/dwg/status HTTP/1.1" 200 -
+20/Oct/2026 15:56:09 - "POST /api/dwg/status HTTP/1.1" 200 -
+```

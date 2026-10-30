@@ -1,271 +1,165 @@
-# Agent instructions for F.E.R.O.-Launcher
+# Универсальный регламент для ИИ-агентов (AGENTS.md) — Бюро «ФЕРО»
 
-## Absolute Single Source of Truth (SSOT)
+> **Статус**: Single Source of Truth (Единый официальный источник корпоративных знаний FERO)  
+> **Применимость**: Google Antigravity, OpenCode, OpenAI Codex, Claude Code, Cursor, Windsurf, GitHub Copilot.  
+> **Первоисточник**: `https://github.com/f-engineering-spb/f-engineering-knowledge-base` (ветка `main`)  
+> **Официальный брендбук**: `https://ferospb.info` (зеркало: `https://fero-spb.info`)
 
-- **CANONICAL LOCATION**: `C:\Users\a9379\Documents\Codex\F.E.R.O.-Launcher`
-- **DEFAULT BRANCH**: `main`
-- **BASELINE COMMIT**: `5edf1427d53ef5fd920cd47a89c6292476a5a8a7` (tag `v1.0.0-fero-base`)
+---
 
-CRITICAL RULE FOR ALL AI AGENTS (OpenCode, Claude, Cursor, Antigravity, ChatGPT, Codex):
-1. **DO NOT** search the filesystem, disks, or other directories for alternative launcher versions, legacy platforms, or past checkpoints.
-2. **DO NOT** reference or touch `FEngineering_Platform`, `FEngineering_Launcher`, `%TEMP%`, or `scratch` directories.
-3. This directory (`C:\Users\a9379\Documents\Codex\F.E.R.O.-Launcher`) is the ONLY authoritative repository and working tree.
-4. Always adhere to `docs/CORE_ARCH_RULES.md` and `docs/RENDERING_SPEC.md` (150 DPI PNG raster via PyMuPDF, instant Word HTML, cached Excel sheets, native format cards).
+## 1. Базовые принципы и бренд FERO
 
-## Runtime safety
+1. **Официальный бренд во всех клиентских документах:**
+   - Все исходящие материалы (коммерческие предложения, ведомости объемов работ, сметы, письма, паспорта) выпускаются строго под брендом **FERO (ООО «ФЕРО» / Инженерное бюро «ФЕРО»)**.
+   - Наименование «*F-Engineering*» является исключительно внутренним техническим термином базы знаний и **категорически запрещено** в клиентских документах.
+2. **Фирменные цвета FERO:**
+   - **Architectural Copper** (`#D6632B`) — фирменная медь: логотип, акценты, ключевые кнопки.
+   - **Deep Graphite** (`#111111`) — чертежный контур знака (3px), тонкие рамки.
+   - **Dark Slate / Navy** (`#0F172A` / `#1E293B`) — основной цвет заголовков и плотного текста.
+   - **Pure White** (`#FFFFFF`) — фон, бумага документов.
+3. **Официальный логотип (доступен по HTTPS и локально в векторе):**
+   - Вектор: `https://ferospb.info/assets/fero_logo_contour_copper.svg`
+   - Растр (300 DPI): `https://ferospb.info/assets/fero_logo_contour_copper.png`
+   - В автономных HTML-документах применяется встроенный Inline SVG из `docs/F_ENGINEERING_VISUAL_STYLE.md`.
 
-- Keep live runtime execution in this workspace (`C:\Users\a9379\Documents\Codex\F.E.R.O.-Launcher`).
-- Launch GUI through `app\flauncher.pyw` or the desktop shortcut `F.E.R.O.-Launcher`.
-- Do not commit generated caches, manifests, rendered previews, or logs (`runtime/cache/`, `runtime/logs/`).
+---
 
-## Development discipline
+## 2. Два режима работы с коммерческой документацией
 
-- Make small, verifiable changes on branch `main`.
-- Keep frontend, backend, render pipeline, and runtime data separated.
-- Treat Cyrillic text as a first-class project requirement. All source, docs, JSON manifests, HTML, CSS, JS, and Python files must be UTF-8.
-- Static text assets served by the backend must include `charset=utf-8` for text content types.
-- Always check `docs/CORE_ARCH_RULES.md` before modifying rendering or preview logic.
+Любой агент при формировании стоимостных расчетов обязан различать два ключевых сценария:
 
-## Product direction
+### РЕЖИМ 1. Работа по форме Заказчика (Тендерный Excel / ВОР заказчика)
+*Применяется в 90-99% тендерных процедур генподрядчиков и девелоперов:*
+1. **Неприкосновенность структуры:** Категорически запрещено удалять строки, менять порядок позиций, переименовывать графы или ломать формулы заказчика (это приводит к автоматическому отклонению заявки при машинном сопоставлении смет).
+2. **Брендирование:** В верхний угол или колонтитул листа аккуратно вставляется медный логотип FERO (`https://ferospb.info/assets/fero_logo_contour_copper.png`).
+3. **Фирменная стилизация ячеек:**
+   - Шрифт: `Segoe UI` или `Arial`.
+   - Шапки колонок: фон `#f6f8fa`, границы `#d1d9e0`, выравнивание по центру, перенос текста.
+   - Итоговые строки: подложка `#eef1f4`, шрифт медный акцент `#D6632B` или тёмно-синий `#0F172A`, двойная нижняя рамка.
+   - Числа: денежный формат с разделителями тысяч пробелом `#,##0.00`.
+   - Включение линий сетки (Gridlines = True).
+   - Автоматическая стилизация выполняется скриптом `scripts/style_excel_fero.py`.
 
-Launcher v3 should be built from verified bricks:
+### РЕЖИМ 2. Собственное коммерческое предложение FERO «с нуля»
+*Применяется для инициативных КП, бюджетных оценок, концептуальных расчетов и оферт:*
+1. **Канонический шаблон:** Оформляется строго по утвержденному эталону `templates/KP_FERO_P01_Template.html`.
+2. **Палитра по умолчанию:** **Стиль №1 — P01 GitHub Light Direct** (белый фон `#ffffff`, подложка секций `#f6f8fa`, шапки таблиц `#eef1f4`, границы `#d1d9e0`, глубокий текст `#0F172A`).
+3. **Шапка документа:**
+   - Слева: векторный медный логотип ФЕРО (`#D6632B` с контуром `#111111`).
+   - Справа: реквизиты ООО «ФЕРО» (выровнены по левому краю строки 2 с адресом, без жирного шрифта, вес Medium 500).
+4. **Заголовок:** `КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ №...` (шрифт 15px, без жирного начертания, без подписей снизу).
+5. **Метаданные (строго в порядке):**
+   - 1-я строка: `Дата:`
+   - 2-я строка: `Заказчик:`
+   - 3-я строка: `Объект:`
+6. **Таблица расчета (выравнивание ячеек строго по высоте middle):**
+   - Шапка: `№` | `Вид работ` | `Ед.` | `Кол.` | `Цена с НДС, ₽` | `Сумма с НДС, ₽`.
+   - Числа: разделение разрядов тысяч пробелом, без запятых (напр. `280 000.00`).
+   - **Два канонических раздела:**
+     - **`1. МАТЕРИАЛЫ`** (промежуточный итог: `Итого по Разделу 1 (Материалы): ...`)
+     - **`2. УСЛУГИ (проектирование и изготовление, монтаж, логистика, комплектация, спецтехника, накладные расходы, прибыль)`** (промежуточный итог: `Итого по Разделу 2 (Услуги): ...`)
+   - Итоговая строка: `ВСЕГО ПО ПРЕДЛОЖЕНИЮ С НДС:` (без указания 22%).
+   - Строка НДС: `В том числе НДС:` (без курсива, нормальный шрифт).
+7. **Условия:** Сроки изготовления и монтажа, порядок оплаты, гарантия.
+8. **Подпись:** Слева только `Генеральный директор ООО «ФЕРО» / М.П.`. В правом нижнем углу — **строго пусто** (никаких полей Заказчика). Никаких лишних веб-кнопок.
 
-1. object list and object import/update/exclude;
-2. tree and format filters;
-3. accepted PDF render/cache pipeline: mass overview at `150 DPI`, active page at `300 DPI`;
-4. accepted viewer controls: thumbnails, zoom, fit, pan, hand/arrow, medium/full modes;
-5. later: Word, Excel, images, DWG strategy, and modules.
+---
 
-The intermediate product goal is documented in
-`docs/PRODUCT_DIRECTION_VISUAL_TRIAGE_AND_MODULES.md`: Launcher is a local
-visual-selection shell between project folders, native applications, and later
-bounded processing modules.  It must not be positioned or implemented as a
-replacement for CAD, Office, a full DMS, or a generic AI chat.
+## 3. Инженерный анализ и парсинг документации
 
-- Preserve original files and source folder structure; cache is derived and
-  separately disposable.
-- Prioritize time to first useful preview, transparent progress, warm-cache
-  speed, and safe cache invalidation over an unrealistic promise that every
-  cold document set is fully rendered in seconds.
-- A future module must have declared inputs, output, confidence, and a
-  reproducible log; never add an opaque “AI button”.
+Все сотрудники и агенты при обработке входящей документации следуют 6-фазному регламенту:
 
-## Session handoff
+```
+[Фаза 1: Аудит папки и Паспорт] ──> [Фаза 2: CAD DWG парсинг] ──> [Фаза 3: Векторный PDF анализ]
+                                                                               │
+[Фаза 6: Сдача файлов ИИ] <─── [Фаза 5: Генерация ВОР/КП] <─── [Фаза 4: Динамический WBS]
+```
 
-Before the next product-development session, read `docs/HANDOFF_2026-08-12.md` and `docs/ROADMAP.md`.
+1. **Фаза 1: Реестр и паспорт объекта:**
+   - Первичная сортировка файлов: DWG/DXF (чертежи), PDF (АР/КМ), XLSX (ТЗ/сметы).
+   - Определение фасадных брендов: профили (Alutech, Schueco, Unistem), стекло (Larta Glass, AGC), НВФ (клинкер, терракота, керамогранит).
+2. **Фаза 2: Извлечение геометрии из DWG (`accoreconsole.exe` / `ezdxf`):**
+   - Автоматический подсчет площадей штриховок (`HATCH`) и полилиний (`LWPOLYLINE`) через `scripts/dwg_facade_extractor.py`.
+3. **Фаза 3: Векторный контроль PDF (`fitz` / PyMuPDF):**
+   - Сканирование спецификаций АР через `scripts/pdf_facade_scanner.py`.
+   - **Правило сходимости:** расхождение между площадями DWG и ведомостями PDF должно быть $\le \pm 3\%$. При большем расхождении формируется раздел коллизий.
+4. **Фаза 4: Динамическая WBS-декомпозиция фасада (на базе 11 лотов):**
+   - **11 базовых лотов — это стартовая таксономия («рыба»), а не жесткая догма.** Каждый объект уникален!
+   - **Парсинг первоисточников проекта:** Агент обязан извлечь реальную структуру из листов АР:
+     - *«Ведомость отделки фасадов»* (типы и составы пирогов стен, облицовки, витражей);
+     - *«Спецификация элементов заполнения проемов»* (марки ВИТ, ОК, ДВ, ЗФ и др.);
+     - Проектные слои чертежей AutoCAD (DWG).
+   - **Правило дельты (Исключение / Адаптация / Добавление):**
+     - **Исключение лишнего:** Если конструктивного элемента нет в проекте (площадь = 0, нет в спецификациях, напр. нет козырьков, эркеров или террас) — лот **полностью исключается** из ведомости. В смете не должно быть пустых строк!
+     - **Адаптация материалов:** Наименования и технологии берутся строго из проекта (не абстрактный «гранит 30 мм», а точный проектный материал: напр. «Цоколь: керамогранит 1200х600 на подсистеме»).
+     - **Выявление уникальных проектных конструкций:** При обнаружении элементов, выходящих за рамки 11 базовых позиций (зенитные фонари ЗФ, солнцезащитные ламели СЗЛ, моторизованные жалюзи, перголы, раздвижные порталы HST/FS, моллированное/гнутое стекло, противопожарные пояса EI 60) — агент **обязан создать новые проектные лоты** с их проектными шифрами и марками.
+   - **Инженерный паспорт фасада:** Перед расчетом агент формирует сводку структуры: что обнаружено в проекте, что исключено из типовой базы, и какие уникальные конструкции добавлены.
+5. **Фаза 5: Калькуляция и расценки:**
+   - Применяется рыночная база расценок 2026 г.: `references/PRICING_DATABASE.md`.
+6. **Фаза 6: Оформление и сохранение:**
+   - Excel оформляется через `scripts/style_excel_fero.py`.
+   - Инициативные КП формируются по `templates/KP_FERO_P01_Template.html`.
 
-The accepted state at the end of 2026-08-12:
+---
 
-- object shell works;
-- wide tree browsing for long file names works;
-- PDF overview/quality split works;
-- viewer quality indicator works;
-- DWG/PDF pairing works and is accepted for the current stage;
-- DWG opens through the Windows native/default application;
-- Vortex Word preview works and is accepted for the current stage;
-- next direction is Excel preview support, plus optional DWG pair diagnostics and later image previews.
+## 4. Методология технического аудита чертежей
 
-## Accepted DWG rules
+При аудите проектной документации (стадии П / РД) агенты руководствуются:
+- `00_Instructions/Engineering_Drawing_Audit/STANDARD.md` — классификация дефектов и коллизий;
+- `00_Instructions/Engineering_Drawing_Audit/CONTROL_CHECKLIST.md` — чек-лист проверки штампов, отметок, привязок и узлов примыкания;
+- `00_Instructions/Engineering_Drawing_Audit/OUTPUT_STRUCTURE.md` — формат выдачи дефектной ведомости.
 
-- Do not build a custom CAD viewer inside Launcher v3 at this stage.
-- Use PDF pairs as visual previews for DWG.
-- Keep DWG files without PDF pairs visible; show a clear empty preview state instead of hiding them.
-- Open DWG files through Windows default application from Launcher.
-- Pairing must normalize project codes, separators, Cyrillic text, and service prefixes.
-- Pairing must prefer missing a doubtful pair over connecting files from different sections.
-- Explicit `Часть 1` / `Часть 2`, `узел`, and `сечение` conflicts must not be paired.
+---
 
-## Accepted Vortex Word rules
+## 5. Корпоративная чистота рабочей среды (Zero Desktop Clutter)
 
-- Use the name `Вортекс` / `Vortex` for the universal preview module.
-- Do not build a custom Word viewer.
-- Preview `.doc` and `.docx` by converting through Microsoft Word to PDF cache, then use the accepted PDF render pipeline.
-- Keep native opening available as `Открыть Word`.
-- Treat `.gdoc` as a Google Docs shortcut, not as a local Word document.
-- `.gdoc` must be visible in filters/tree and openable, but it should show a no-local-preview placeholder instead of being sent through Microsoft Word.
-- Next Vortex target is Excel: `.xls` / `.xlsx`.
+- **Строго запрещено** сохранять временные файлы на `Desktop` или в корень диска `C:\`.
+- Все промежуточные скрипты, логи парсинга и кэши сохранять в:
+  - Папку проекта `<объект>/ИИ/`;
+  - Локальную папку сессии `<conversation-id>/scratch/`.
 
-## Accepted Vortex Excel rules — 2026-08-13 checkpoint
 
-Excel is a read-only navigation surface, not a second Excel editor.
+---
 
-- Support `.xlsx` / `.xlsm` through an HTML cache per workbook sheet.  Keep
-  `.xls` visible and natively openable; add conversion support only after a
-  separate compatibility test.
-- The large view is the source of truth: it preserves sheet tabs, authored
-  column widths, row heights, merges, basic fonts, fills, scrolling, zoom and
-  hand panning.
-- A workbook card/thumbnail must be a reduced viewport of that exact cached
-  HTML sheet.  Never create a second simplified raster/table renderer for
-  Excel thumbnails.  Separate renderers caused wrong text baselines, clipped
-  rows and a mismatch between card and large view.
-- Build the first selected sheet synchronously; prepare remaining sheets in
-  the background, one at a time.  A cached sheet request must not reopen the
-  workbook merely to rediscover its title.
-- Do not show technical notices inside a worksheet canvas.  Show the complete
-  workbook file name in the Launcher chrome above its sheet tabs.  Card labels
-  must not use ellipses: wrap or allow horizontal reading of the full name.
-- Before declaring Excel work accepted, run: Python compile, JS syntax check,
-  `scripts/check_encoding.cmd`, then real browser QA with several ordinary
-  workbooks, including one multi-sheet file.  Do not generalize from damaged
-  or unusually large workbooks that Office itself struggles to open.
+## 6. Регламент разработки UI, верификации и запрет фиктивного тестирования (Zero-Fake Policy)
 
-## Accepted Excel tab rule
+Каждый агент FERO при решении прикладных задач в интерфейсах и сервисах обязан неукоснительно следовать принципам честной инженерной проверки:
 
-- Excel sheet tabs are ordinary HTML buttons. Keep the proven rounded-button
-  implementation with immediate active-state feedback.
-- Do not reintroduce experimental tab shapes, overlapping tabs, SVG tab
-  backgrounds, or pseudo-element browser-cap effects: they caused visual
-  artefacts and delayed active-state feedback.
+### 1. Запрет фиктивной приёмки (Zero Fake-PASS):
+- **Категорически запрещено** объявлять статус «PASS» / «ГОТОВО» на основании одного лишь синтаксического анализа кода (`node --check`, `py_compile`), статического просмотра текста или факта отсутствия исключений.
+- Синтаксическая валидация проверяет только отсутствие ошибок парсера, но ничего не говорит о реальной работоспособности бизнес-логики.
+- Тест признается пройденным только при реальной проверке сквозной цепочки действий: `Действие пользователя (событие/клик) -> Изменение состояния / DOM / Буфера -> Фактический результат`.
+- Если у агента нет технической возможности выполнить физическое действие в активной GUI-сессии пользователя (нет интерактивного манипулятора курсором в pywebview/экране), агент **обязан прямо заявить**:  
+  `«Не могу самостоятельно выполнить GUI-приёмку: <точная причина>»`,  
+  а не имитировать успех и не давать ложных заверений.
 
-## Accepted viewer control and layer rules — 2026-08-13 checkpoint
+### 2. Контекстные меню и поля ввода в WebView2 / iframe:
+- **Запрет надежды на «нативное меню браузера»:** В pywebview и встроенных iframe нативные контекстные меню браузера (вырезать, скопировать, вставить) по умолчанию подавлены или заблокированы. Простой пропуск события (`return` в обработчике `contextmenu`) приводит к полному отсутствию меню для пользователя.
+- **Явные управляемые HTML-меню:** Для полей ввода и интерактивных областей, где требуется контекстное действие («Вставить», «Скопировать», «Найти»), агент обязан создавать явное, визуально оформленное локальное HTML-меню в утверждённом фирменном стиле (фон `#f6f8fa`, рамка `#d1d9e0`, акцент `#D6632B`, текст `#0F172A`).
+- **Жизненный цикл событий мыши (mousedown vs click):** Глобальные обработчики закрытия меню (на `mousedown` / `pointerdown`) не должны уничтожать меню до того, как клик дойдёт до целевого обработчика пункта меню. Клики по пунктам обязаны обрабатываться гарантированно (до дисмисса или с `stopPropagation`).
+- **Сохранение контекста полей ввода:** При открытии контекстного меню на поле ввода обязаны сохраняться ссылка на инпут, `selectionStart` и `selectionEnd`, чтобы вставка производилась точно в позицию курсора с возвратом `.focus()`.
 
-- The bottom viewer panel is one shared control set for PDF, DWG previews,
-  Word previews, and Excel sheets.  It must retain zoom, `Вписать`, rotate,
-  hand/arrow, and the three viewing modes.  Do not make a reduced Excel or
-  Word variant.
-- The same panel must show a native-open action whenever an original file is
-  available: `Открыть PDF`, `Открыть DWG`, `Открыть Word`, or `Открыть Excel`.
-  Do not omit it for PDF/Word merely because their preview uses the PDF stage.
-- `Вписать` must always have enough fixed width for its full Russian label;
-  it must never be clipped or wrapped because another format has a different
-  panel layout.
-- Excel HTML is an overlay layer.  Its semantic `hidden` state must map to
-  `display: none`; otherwise an inactive Excel iframe can cover a correctly
-  rendered PDF, DWG preview, or Word page and make the large image look blank.
-- Before changing a shared viewer control or layer, inspect both an Excel
-  workbook and a PDF/DWG preview in the real browser.  Do not infer cross-
-  format behaviour from one mode alone.
+### 3. Работа с буфером обмена (Clipboard Contract):
+- **Единая рабочая реализация:** Не создавать параллельные, конкурирующие механизмы копирования. Если в приложении уже работает клавиатурный шорткат (`Ctrl+C`), контекстное меню обязано вызывать ту же самую проверенную функцию.
+- **Честное чтение буфера Windows:** При вставке читать актуальный системный буфер, а не подменять его внутренней переменной («последний скопированный текст»).
+- **Прозрачность системных ограничений:** Если чтение буфера в чистом фронтенде заблокировано политикой безопасности WebView2 без фокуса или разрешений, агент обязан немедленно поднять это ограничение пользователю, а не молча переписывать бэкенд или объявлять фиктивный успех.
 
-## Office handoff: multi-machine rules (2026-09-15, office PC)
+### 4. Безопасность процессов и портов (Single Runtime Instance):
+- **Запрет скрытых GUI-процессов:** Запрещено запускать `flauncher.pyw` / pywebview из консоли агента или на скрытых десктопах. Это блокирует системный мьютекс и порт 8799, ломая рабочий лаунчер пользователя на реальном рабочем столе.
+- **Запрет убийства пользовательских процессов:** Не завершать (`kill`) процессы пользователя без явной команды.
+- **Проверка портов:** Все проверки бэкенда выполнять только обращением к активному запущенному порту 8780.
 
-These rules enable task transfer between the office PC, the laptop and
-different agents without context loss. They supplement (never override)
-the product rules above.
+### 5. Протокол отчётности при решении инцидентов:
+После каждого завершённого шага исправления агент обязан писать краткий структурированный отчёт:
+- `Воспроизвёл: ...`
+- `Причина: ...`
+- `Исправил: ...`
+- `Тест: ...`
+- Никаких утверждений о том, что работа продолжается в фоне, если процесс фактически остановлен.
 
-### 1. Purpose of the Launcher
-
-Fast visual triage of project documents: open an object folder, skim the
-tree, preview PDF / Word / Excel / images / DWG-via-PDF-pairs, open the
-original in its native application. It is a viewing shell, not a CAD,
-Office, DMS or AI-chat replacement.
-
-### 2. Three interface zones (see `app/frontend/index.html`)
-
-1. Left sidebar (`#sidebar`): object list (`#objectListState`) and file
-   tree with search + format filters (`#treeState`, `#objectTree`).
-2. Center viewer (`#pdfViewer` / `#pdfStage`): large page/sheet view,
-   including the Excel overlay (`#excelViewer`).
-3. Bottom strip: thumbnail ribbon (`#pdfThumbs`), shared viewer controls
-   (`#viewerControls`) and the operation progress panel (`#progressPanel`).
-
-### 3. Address and ports
-
-- The only allowed application address is `http://127.0.0.1:8780/`
-  (backend default `--port 8780`, see `app/backend/server.py`).
-- Never use port 8000 for checking this project.
-
-### 4. Sources of truth
-
-- GitHub (`f-engineering-spb/f-engineering-launcher`) is the only source
-  of code and commit history. Working branch: `dvg-main`.
-- The local copy on SSD (e.g.
-  `C:\Users\u301\Documents\Codex\f-engineering-launcher`) is the only
-  working copy of the code.
-- Google Drive `E:\Общие диски\021_F-Engineering_Knowledge_Library\09_Launcher`
-  is a library/archive: documents, tasks, reports, artefacts. It is NOT
-  a Git repository — never `git init` inside `E:` and never hand-copy
-  code between `E:` and the local repo when GitHub can provide it.
-
-### 5. Live data protection
-
-- Do NOT touch live data on `H:` / `E:` on your own initiative (no scan,
-  import, move, rename, delete of real object folders).
-- Test fixtures live only locally (e.g. `C:\tmp\launcher_check_src`);
-  real DWG/object folders are opened only on explicit instruction.
-
-### 6. Heavy CAD ban (default)
-
-- Do NOT run heavy DWG conversion or AutoCAD (daemon, oneshot, model
-  space renders) without a separate explicit permission — every
-  conversion opens AutoCAD on the user's machine.
-- Lightweight checks (PDF, Word, Excel, images, tree, progress panel)
-  need no extra permission.
-
-### 7. Mandatory verification and reporting
-
-- After every meaningful change run a local smoke test on
-  `http://127.0.0.1:8780/` and record the result.
-- Assignments follow `docs/TASK_TEMPLATE.md`; every session ends with a
-  report in the shape of `docs/REPORT_TEMPLATE.md` (final message only,
-  no intermediate questions).
-
-### 8. Do not distract the user
-
-- Never ask the user to run git commands, copy files, hunt processes or
-  open a console. Do everything checkable yourself on the machine.
-- Ask the user only for decisions you cannot resolve by inspection
-  (credentials, live-data access, heavy CAD runs, product direction).
-- Frontend edits require F5 in the browser (stale JS trap); backend
-  Russian text requires `scripts/check_encoding.cmd` before/after.
-
-### 9. Forbidden by default
-
-- No health-check endpoints polling schemes, no cron/schedule tasks, no
-  auto-sync and no background monitors unless a separate decision
-  explicitly allows them.
-
-### 10. Clean baseline freeze (2026-09-17, branch `review/v3.3-updates`)
-
-- Before touching UI or key routes, read the docs: base flow is
-  `docs/LAUNCHER_BASELINE_WORKFLOW.md`, the Load button is a frozen
-  contract in `docs/LOAD_BUTTON_CONTRACT.md`.
-- Without an explicit user order it is forbidden to: change main-button
-  behaviour, add dialogs / built-in explorers / file browsers, replace
-  system Windows dialogs with custom UI, "improve" the working flow, or
-  resurrect previously removed mechanisms (`choose_folder.*`,
-  `/api/browse`, `browse_filesystem()`, legacy COM openers,
-  `/api/open-explorer`).
-- A feature not described in the base flow is not assumed needed: ask
-  or propose it separately first.
-- DWG work must not break: object loading, file tree, ribbon + viewer,
-  native operations, the Load button. Keep DWG changes in small
-  separate commits.
-
-### 11. Sole current baseline (dvg-main)
-
-ЕДИНСТВЕННАЯ АКТУАЛЬНАЯ БАЗА
-
-Единственная актуальная ветка проекта — dvg-main.
-
-Работать нужно только из текущего репозитория и только после:
-
-git switch dvg-main
-
-История до текущего состояния намеренно не используется.
-Старые ветки, теги, коммиты, архивы и внешние копии не являются источниками кода.
-Не искать и не восстанавливать прежние версии.
-Не сравнивать текущий код со старыми версиями.
-Не использовать _BACKUP как рабочую базу.
-
-Внешняя папка _BACKUP не является актуальной рабочей базой.
-Единственная актуальная база — ветка dvg-main текущего репозитория.
-Старые локальные копии и архивы запрещено использовать без прямого указания пользователя.
-
-Актуальная рабочая папка — `C:\Users\a9379\Documents\Codex\FEngineering_Launcher_v3_CURRENT_COPY`.
-Папку `FEngineering_Launcher_v3_OLD_DO_NOT_USE` не использовать.
-Старые Git-истории не искать, старые версии не восстанавливать.
-Единственная база — текущий HEAD ветки dvg-main.
-
-### 12. Стандарты запуска CLI-агента (agy)
-
-- **Исполняемый файл:** `agy`
-- **Команда пакетного запуска:**
-  ```powershell
-  agy -p "$(Get-Content prompt.txt -Raw)" --dangerously-skip-permissions --mode accept-edits
-  ```
-- **Рабочая ветка:** `dvg-main`
-- **Актуальная рабочая папка:** `C:\Users\a9379\Documents\Codex\FEngineering_Launcher_v3_CURRENT_COPY`
-- **Запрещённая папка:** `C:\Users\a9379\Documents\Codex\FEngineering_Launcher_v3_OLD_DO_NOT_USE`
-- **Хелпер запуска:** В корне репозитория создан скрипт `RUN_AGENT.cmd` для удобного запуска CLI-агента со считыванием задачи из `prompt.txt`.
-
+### 6. Запрет ложных путей и регламент сравнительной диагностики UI-цепочек (Differential Debugging Policy):
+- **Запрет слепого переписывания подсистем:** Если действие в интерфейсе (пункт контекстного меню, кнопка, выпадающий список) не выполняет ожидаемый результат, **категорически запрещено** сразу объявлять сбой глубоких системных механизмов (буфер обмена Windows, права WebView2, межфреймовые барьеры iframe, сетевой стек) и тратить время на их слепое переписывание.
+- **Обязательное сравнительное профилирование (Differential Analysis):** Агент обязан сначала сопоставить цепочку неработающего элемента с тем, что **уже работает в приложении** (плашка, шорткат `Ctrl+C`, кнопка тулбара). Пошагово проследить: `Элемент DOM -> pointerdown -> mousedown -> mouseup -> click -> обработчик -> снимок контекста -> целевая функция`. Найти точную строчку, где цепочки расходятся.
+- **Запрет деструктивных обработчиков мыши:** Запрещено вызывать `e.preventDefault()` на событии `mousedown` для кнопок (`<button>`) и интерактивных элементов в WebView2/Chromium, так как это подавляет стандартную генерацию события `click`.
+- **Защита интерактивных контейнеров от самоликвидации:** Любые создаваемые локальные всплывающие меню и виджеты обязаны быть включены в селекторы исключений глобальных обработчиков сброса (`e.target.closest(...)`), иначе любой клик по фону или отступам меню сбрасывает фокус, текстовое выделение и координаты рабочей зоны до выполнения команды.
+- **Изоляция локального снимка аргументов:** Аргументы команды (текст, координаты зоны) обязаны фиксироваться локально в замыкании до вызова функций скрытия/очистки меню.
